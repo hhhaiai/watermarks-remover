@@ -1,0 +1,6 @@
+name = "remove-watermark"
+compatibility_date = "2026-08-21"
+pages_build_output_dir = "public"
+
+# Pages Functions read the backend URL and optional bearer key from the
+# dashboard/environment. Do not put either value in this file.

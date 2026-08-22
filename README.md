@@ -185,6 +185,25 @@ curl -s -X POST "$WM/clean" -H 'Content-Type: application/json' \
 
 The service routes by filename extension then magic bytes, so text / image / container are auto-detected. Set `WATERMARKS_SERVER_API_KEY` to require `Authorization: Bearer <key>` on every request. Loopback-only bind by default (`--host` to override); intended for a trusted network.
 
+### Cloudflare Pages web client
+
+This branch also includes a no-build static web client for Cloudflare Pages:
+[`public/`](public/) contains the UI and [`functions/`](functions/) provides a
+same-origin `/api/*` proxy to the Python service. Pages Functions cannot run
+the Python process or the native metadata tools, so the core Docker service
+still runs separately and is configured through the Pages variables
+`WATERMARKS_BACKEND_URL` and the secret `WATERMARKS_BACKEND_API_KEY`.
+
+The text tab has a small browser-local fallback for the three unambiguous
+character-level carriers `U+00AD`, `U+200B`, and `U+FEFF` when the backend is
+not configured. Full text inspection/cleaning, plus image, video, Office,
+PDF, and other file processing, uses the Python service and therefore needs
+the backend variables.
+
+The deployment-specific steps, including the custom domain
+[`remove-watermark.page.dev`](https://remove-watermark.page.dev), are in
+[`docs/cloudflare-pages.md`](docs/cloudflare-pages.md).
+
 ### Watermark detection (`/detect` and `detect_before` / `detect_after`)
 
 Detection is a separate step from cleaning — the service never calls vendor

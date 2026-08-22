@@ -10,6 +10,10 @@
 !/docs/**
 !/service/
 !/service/**
+!/functions/
+!/functions/**
+!/public/
+!/public/**
 !/skills/remove-ai-marks/
 !/skills/remove-ai-marks/**
 !/tests/
@@ -30,6 +34,7 @@
 !/requirements-dev.txt
 !/ruff.toml
 !/SECURITY.md
+!/wrangler.toml
 
 # Exceptions even inside allowed trees
 .env

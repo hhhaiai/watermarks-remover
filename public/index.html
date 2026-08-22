@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta id="theme-color" name="theme-color" content="#050505" />
+    <meta
+      name="description"
+      content="清理文本、图片、视频和文档中的隐藏标记与 provenance metadata。"
+    />
+    <link rel="canonical" href="https://remove-watermark.page.dev/" />
+    <link rel="stylesheet" href="/styles.css?v=20260822-7" />
+    <title>Remove Watermark · 文本与文件净化</title>
+  </head>
+  <body>
+    <div class="ambient ambient-left" aria-hidden="true"></div>
+    <div class="ambient ambient-right" aria-hidden="true"></div>
+
+    <header class="site-header shell" id="site-header">
+      <a class="brand" href="#page-top" aria-label="Remove Watermark home">
+        <span class="brand-mark" aria-hidden="true">⌁</span>
+        <span>
+          <strong data-i18n="brand_name">remove watermark</strong>
+          <small data-i18n="brand_subtitle">content hygiene workspace</small>
+        </span>
+      </a>
+      <div class="header-controls">
+        <div class="service-pill" id="service-status" data-state="checking">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="service-status-text" data-i18n="service_checking">正在连接服务…</span>
+        </div>
+        <label class="header-select" title="Language">
+          <span class="header-select-icon" aria-hidden="true">文</span>
+          <span class="sr-only" data-i18n="language_label">语言</span>
+          <select id="language-select" aria-label="Language" data-i18n-aria-label="language_label">
+            <option value="zh-CN">中文</option>
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="pt-BR">Português</option>
+            <option value="ru">Русский</option>
+            <option value="ar">العربية</option>
+          </select>
+        </label>
+        <label class="header-select" title="Theme">
+          <span class="header-select-icon" aria-hidden="true">◐</span>
+          <span class="sr-only" data-i18n="theme_label">主题</span>
+          <select id="theme-select" aria-label="Theme" data-i18n-aria-label="theme_label">
+            <option value="dark" data-i18n="theme_dark">深色</option>
+            <option value="light" data-i18n="theme_light">浅色</option>
+            <option value="midnight" data-i18n="theme_midnight">午夜蓝</option>
+            <option value="forest" data-i18n="theme_forest">森林绿</option>
+            <option value="violet" data-i18n="theme_violet">紫罗兰</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <main class="shell" id="page-top">
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">TEXT · IMAGE · VIDEO · DOCUMENT</p>
+        <h1 id="page-title"><span data-i18n="hero_title_a">粘贴内容，</span><em data-i18n="hero_title_b">拿回干净结果。</em></h1>
+        <p class="hero-copy" data-i18n="hero_copy">
+          检查并清理文本中的隐藏字符、图片和视频中的 provenance metadata，以及常见文档中的 AI 标记。输入内容只在当前处理过程中使用。支持文本、图片、视频、音频和常见文档。
+        </p>
+      </section>
+
+      <section class="cleaner-card" id="cleaner-card" aria-label="内容净化工作区" data-i18n-aria-label="workspace_aria">
+        <div class="cleaner-grid">
+          <section class="input-column" aria-labelledby="input-title">
+            <div class="column-heading">
+              <div>
+                <span class="column-kicker">01 / INPUT</span>
+                <h2 id="input-title" data-i18n="input_title">输入内容</h2>
+              </div>
+              <span class="character-count" id="character-count">0 / 20,000 字符</span>
+            </div>
+
+            <textarea
+              id="text-input"
+              rows="12"
+              maxlength="20000"
+              placeholder="把需要筛查的文字粘贴到这里…"
+              data-i18n-placeholder="text_placeholder"
+              spellcheck="false"
+              aria-label="待处理文本"
+              data-i18n-aria-label="text_aria"
+            ></textarea>
+
+            <div class="input-tools">
+              <button class="attach-button" id="attach-button" type="button">
+                <span aria-hidden="true">＋</span>
+                <span data-i18n="attach_label">添加图片 / 文件</span>
+              </button>
+              <input
+                id="attachment-input"
+                type="file"
+                accept="text/*,image/*,video/*,audio/*,.pdf,.docx,.xlsx,.pptx,.odt,.epub,.md,.csv,.json,.svg,.html"
+                hidden
+              />
+              <label class="option-check">
+                <input id="text-nfkc" type="checkbox" />
+                <span data-i18n="nfkc_label">Unicode NFKC</span>
+              </label>
+            </div>
+
+            <div class="attachment-dropzone" id="attachment-dropzone">
+              <span class="drop-icon" aria-hidden="true">↳</span>
+              <span>
+                <strong data-i18n="drop_title">拖拽文件到这里</strong>
+                <small data-i18n="drop_hint">图片、视频、音频、TXT、MD、PDF、Office 均可</small>
+              </span>
+            </div>
+
+            <div class="attachment-preview" id="attachment-preview" hidden>
+              <span class="attachment-icon" id="attachment-icon" aria-hidden="true">FILE</span>
+              <span class="attachment-name" id="attachment-name">—</span>
+              <button class="attachment-remove" id="attachment-remove" type="button" aria-label="移除附件" data-i18n-aria-label="remove_attachment">×</button>
+            </div>
+          </section>
+
+          <section class="output-column" aria-labelledby="output-title">
+            <div class="column-heading">
+              <div>
+                <span class="column-kicker">02 / OUTPUT</span>
+                <h2 id="output-title" data-i18n="output_title">处理结果</h2>
+              </div>
+              <span class="output-state" id="output-state">等待输入</span>
+            </div>
+
+            <div class="output-panel" id="output-panel" aria-live="polite">
+              <div class="output-placeholder" id="output-placeholder">
+                <span class="output-mark" aria-hidden="true">✦</span>
+                <p data-i18n="output_placeholder">过程分析和修正后的结果会显示在这里。</p>
+              </div>
+
+              <div class="output-loading" id="output-loading" hidden>
+                <span class="loading-mark" aria-hidden="true">✦</span>
+                <span data-i18n="loading_clean">正在筛查并修正…</span>
+              </div>
+
+              <div class="output-content" id="output-content" hidden>
+                <section class="result-block analysis-block">
+                  <div class="result-heading">
+                    <span data-i18n="analysis_title">过程分析</span>
+                    <span class="result-tag" id="analysis-tag">SCAN</span>
+                  </div>
+                  <pre id="analysis-output"></pre>
+                </section>
+
+                <section class="result-block corrected-block">
+                  <div class="result-heading">
+                    <span data-i18n="corrected_title">修正后的结果</span>
+                    <button class="copy-button" id="copy-button" type="button" data-i18n="copy_button">复制</button>
+                  </div>
+                  <pre id="corrected-output"></pre>
+                </section>
+
+                <div class="file-result" id="file-result" hidden></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="submit-row">
+          <span class="submit-hint" id="submit-hint" data-i18n="submit_empty">输入文字，或添加一个文件开始处理。</span>
+          <div class="submit-actions">
+            <button class="scan-button" id="scan-button" type="button" disabled>
+              <span data-i18n="scan_only">仅扫描</span>
+              <span aria-hidden="true">⌕</span>
+            </button>
+            <button class="submit-button" id="submit-button" type="button" disabled>
+              <span data-i18n="scan_and_clean">扫描并修正</span>
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-section workspace-story" aria-labelledby="workspace-story-title">
+        <div class="section-copy">
+          <span class="section-kicker" data-i18n="workspace_kicker">ONE WORKSPACE</span>
+          <h2 id="workspace-story-title"><span data-i18n="workspace_title_a">不只是对话，</span><em data-i18n="workspace_title_b">文件也可以直接放进来。</em></h2>
+          <p data-i18n="workspace_copy">
+            从一段粘贴的文字，到一张图片、一段视频或一份文档，都从同一个输入区开始。处理过程和最终结果始终在右侧对应展示，不需要在多个工具之间切换。
+          </p>
+          <ul class="feature-list">
+            <li><span aria-hidden="true">✓</span><span data-i18n="feature_analysis">先分析，再输出修正后的内容</span></li>
+            <li><span aria-hidden="true">✓</span><span data-i18n="feature_copy_download">文本可以直接复制，文件可以下载</span></li>
+            <li><span aria-hidden="true">✓</span><span data-i18n="feature_preview">图片和视频在结果区保留预览</span></li>
+          </ul>
+        </div>
+        <div class="story-visual" aria-label="文件进入工作区并生成结果的示意图" data-i18n-aria-label="workflow_visual_aria">
+          <div class="visual-window visual-input-window">
+            <div class="visual-window-top"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span><span class="visual-label">INPUT</span></div>
+            <div class="visual-paper-lines">
+              <span></span><span></span><span class="line-short"></span><span class="line-marked"></span><span></span>
+            </div>
+            <div class="visual-file-chip"><b>TXT</b><span>pasted-content.txt</span></div>
+          </div>
+          <div class="visual-connector" aria-hidden="true"><span>→</span><small>SCAN</small></div>
+          <div class="visual-window visual-output-window">
+            <div class="visual-window-top"><span class="visual-label">OUTPUT</span><span class="visual-status">CLEAN</span></div>
+            <div class="visual-result-lines"><span></span><span></span><span></span><span class="line-clean"></span></div>
+            <div class="visual-result-badge"><span aria-hidden="true">✓</span><span data-i18n="corrected_title">修正后的结果</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-section media-story" aria-labelledby="media-story-title">
+        <div class="media-visual" aria-label="图片、视频和文档类型示意图" data-i18n-aria-label="media_visual_aria">
+          <div class="media-preview-card">
+            <div class="media-preview-top"><span class="media-type">IMAGE</span><span class="media-menu">•••</span></div>
+            <div class="media-preview-art">
+              <svg viewBox="0 0 320 168" role="img" aria-label="图片预览示意">
+                <defs>
+                  <linearGradient id="scene-gradient" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#28234f" />
+                    <stop offset="1" stop-color="#0f6b70" />
+                  </linearGradient>
+                </defs>
+                <rect width="320" height="168" rx="10" fill="url(#scene-gradient)" />
+                <circle cx="245" cy="48" r="23" fill="#e7cf8e" opacity=".9" />
+                <path d="M0 139 72 76l52 38 45-49 151 103H0Z" fill="#78e2c5" opacity=".75" />
+                <path d="M0 152 91 104l47 28 55-43 127 79H0Z" fill="#5047a0" opacity=".85" />
+                <rect x="18" y="18" width="72" height="20" rx="10" fill="#0a0b12" opacity=".7" />
+                <text x="31" y="32" fill="#d8d4ff" font-size="9" font-family="system-ui">PREVIEW</text>
+              </svg>
+            </div>
+            <div class="media-preview-meta"><strong>cleaned-preview.png</strong><span data-i18n="cleaned_file_copy">修正后的文件副本</span></div>
+          </div>
+          <div class="media-type-stack">
+            <span class="type-pill type-image">IMG</span>
+            <span class="type-pill type-video">MP4</span>
+            <span class="type-pill type-doc">PDF</span>
+          </div>
+        </div>
+        <div class="section-copy">
+          <span class="section-kicker" data-i18n="media_kicker">TEXT · IMAGE · VIDEO · DOCUMENT</span>
+          <h2 id="media-story-title"><span data-i18n="media_title_a">把图片和其他文件，</span><em data-i18n="media_title_b">一起放进同一个流程。</em></h2>
+          <p data-i18n="media_copy">
+            点击加号选择文件，或者直接拖拽到输入区。图片、视频、音频、PDF 和 Office 文件会沿用项目已有的格式处理能力，输出区域会给出分析信息并提供修正后的文件下载。
+          </p>
+          <div class="format-grid" aria-label="支持的文件类型" data-i18n-aria-label="formats_aria">
+            <span>PNG / JPG / WEBP</span>
+            <span>MP4 / MP3</span>
+            <span>PDF / DOCX</span>
+            <span>TXT / MD / JSON</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="scan-story" aria-labelledby="scan-story-title">
+        <div class="section-heading-centered">
+          <span class="section-kicker" data-i18n="scan_kicker">DEEP SCAN</span>
+          <h2 id="scan-story-title" data-i18n="scan_title">先扫描，再决定如何处理。</h2>
+          <p data-i18n="scan_copy">扫描模式只读不改，适合先判断图片或文件里到底有什么标记。</p>
+        </div>
+        <div class="scan-layers">
+          <article class="scan-layer-card">
+            <span class="scan-layer-number">LAYER 01</span>
+            <div class="scan-layer-icon" aria-hidden="true">◎</div>
+            <h3 data-i18n="scan_layer1_title">来源与元数据</h3>
+            <p data-i18n="scan_layer1_copy">检查 C2PA、EXIF、XMP、AI metadata，以及文本中的隐藏 Unicode 标记。</p>
+            <span class="scan-layer-tag">C2PA · EXIF · UNICODE</span>
+          </article>
+          <article class="scan-layer-card scan-layer-card-accent">
+            <span class="scan-layer-number">LAYER 02</span>
+            <div class="scan-layer-icon" aria-hidden="true">⌁</div>
+            <h3 data-i18n="scan_layer2_title">不可见信号</h3>
+            <p data-i18n="scan_layer2_copy">在已配置对应检测器时，继续检查图片或文本中的候选 AI watermark 信号，并显示检测器状态。</p>
+            <span class="scan-layer-tag">SYNTHID · DETECTORS · SCORE</span>
+          </article>
+          <article class="scan-layer-card">
+            <span class="scan-layer-number">RESULT</span>
+            <div class="scan-layer-icon" aria-hidden="true">✓</div>
+            <h3 data-i18n="scan_result_title">可复核的报告</h3>
+            <p data-i18n="scan_result_copy">输出命中项、数量、格式和可用性；扫描本身不会覆盖原始内容。</p>
+            <span class="scan-layer-tag">READ ONLY · REVIEW</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="steps-section" aria-labelledby="steps-title">
+        <div class="section-heading-centered">
+          <span class="section-kicker" data-i18n="steps_kicker">HOW IT WORKS</span>
+          <h2 id="steps-title" data-i18n="steps_title">三步完成一次净化</h2>
+        </div>
+        <div class="steps-grid">
+          <article class="step-card">
+            <span class="step-number">01</span>
+            <h3 data-i18n="step_input_title">输入</h3>
+            <p data-i18n="step_input_copy">粘贴文字、点击加号选文件，或把文件拖到工作区。</p>
+          </article>
+          <article class="step-card">
+            <span class="step-number">02</span>
+            <h3 data-i18n="step_analysis_title">分析</h3>
+            <p data-i18n="step_analysis_copy">识别格式、隐藏字符、provenance metadata 和可疑标记。</p>
+          </article>
+          <article class="step-card">
+            <span class="step-number">03</span>
+            <h3 data-i18n="step_result_title">取回结果</h3>
+            <p data-i18n="step_result_copy">文本直接复制，图片、视频和文档下载修正后的副本。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="faq-section" aria-labelledby="faq-title">
+        <div class="faq-intro">
+          <span class="section-kicker" data-i18n="faq_kicker">FAQ</span>
+          <h2 id="faq-title" data-i18n="faq_title">常见问题</h2>
+          <p data-i18n="faq_copy">把处理边界和结果形式说清楚。</p>
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary><span data-i18n="faq1_q">文件会保存在哪里？</span><span aria-hidden="true">⌄</span></summary>
+            <p data-i18n="faq1_a">页面不会建立原始文件列表。文件只在当前请求和处理流程中使用，结果返回后由浏览器决定是否下载。</p>
+          </details>
+          <details>
+            <summary><span data-i18n="faq2_q">图片和视频会显示什么结果？</span><span aria-hidden="true">⌄</span></summary>
+            <p data-i18n="faq2_a">右侧会先显示处理类型和检测到的标记，随后提供修正后的文件副本；图片和视频还会显示浏览器预览。</p>
+          </details>
+          <details>
+            <summary><span data-i18n="faq3_q">能去掉画面里肉眼可见的水印吗？</span><span aria-hidden="true">⌄</span></summary>
+            <p data-i18n="faq3_a">当前默认流程主要处理隐藏字符、provenance 和 metadata。画面内可见水印需要项目中已配置对应的像素级后端能力。</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="sponsor-section" aria-labelledby="sponsor-title">
+        <div class="sponsor-logo-wrap">
+          <img class="sponsor-logo" src="/assets/simirouter-logo.jpeg" alt="SimiRouter" />
+        </div>
+        <div class="sponsor-copy">
+          <span class="section-kicker" data-i18n="sponsor_kicker">SPONSORED BY SIMIROUTER</span>
+          <h2 id="sponsor-title"><span data-i18n="sponsor_title_a">用 API，</span><em data-i18n="sponsor_title_b">到 SimiRouter。</em></h2>
+          <p data-i18n="sponsor_copy">需要把内容净化能力接进自己的产品？通过 SimiRouter API，把扫描、分析和处理能力接入你的工作流。</p>
+          <a class="sponsor-link" href="https://api.dwchainless.com/" target="_blank" rel="noopener noreferrer">
+            <span data-i18n="sponsor_cta">访问 api.dwchainless.com</span>
+            <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="support-strip" aria-label="支持内容">
+        <span class="support-label" data-i18n="supported_label">SUPPORTED</span>
+        <span data-i18n="support_unicode">隐藏字符</span>
+        <span>AI metadata</span>
+        <span>C2PA</span>
+        <span>PNG / JPG / WEBP</span>
+        <span>MP4 / MP3</span>
+        <span>PDF / Office</span>
+      </section>
+
+      <p class="error-banner" id="error-banner" role="alert" hidden></p>
+    </main>
+
+    <footer class="site-footer shell">
+      <span>remove-watermark.page.dev</span>
+      <span data-i18n="footer_storage">no original file storage</span>
+    </footer>
+
+    <button class="back-to-top" id="back-to-top" type="button" aria-label="回到顶部" data-i18n-aria-label="back_to_top" hidden>
+      <span aria-hidden="true">↑</span>
+      <span data-i18n="back_to_top">顶部</span>
+    </button>
+
+    <script src="/i18n.js?v=20260822-2" defer></script>
+    <script src="/app.js?v=20260822-7" defer></script>
+  </body>
+</html>
