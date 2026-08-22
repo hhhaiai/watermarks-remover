@@ -14,6 +14,7 @@
 !/skills/remove-ai-marks/**
 !/tests/
 !/tests/**
+!/.coderabbit.yaml
 !/.dockerignore
 !/.env.example
 !/.gitignore
