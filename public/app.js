@@ -393,7 +393,7 @@
     for (const [phase, label] of [["synthid_before", t("detector_before")], ["synthid_after", t("detector_after")]]) {
       const score = report && report[phase];
       if (!score || typeof score !== "object") continue;
-      lines.push(...detectionLines({ detections: [{ detector: "synthid " + label, ...score }] }));
+      lines.push(...detectionLines({ detections: [{ ...score, detector: "synthid " + label }] }));
     }
 
     lines.push(...detectionLines(detection));
