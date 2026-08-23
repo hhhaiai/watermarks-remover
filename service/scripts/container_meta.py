@@ -5,6 +5,7 @@ Stdlib-first; PDF prefers optional exiftool/c2patool when present.
 """
 
 import base64
+import hashlib
 import io
 import posixpath
 import re
@@ -12,6 +13,7 @@ import subprocess
 import urllib.parse
 import zipfile
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -770,6 +772,8 @@ def _zip_namelist(data: bytes) -> list[str]:
 
 
 MAX_ZIP_DECOMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_OFFICE_LAYER_A_HIT_GROUPS = 256
+MAX_OFFICE_LAYER_A_SAMPLES_PER_HIT = 10
 
 
 def _check_zip_budget(info: zipfile.ZipInfo, budget: list[int]) -> None:
@@ -820,11 +824,22 @@ def _is_docx_meta_part(name: str) -> bool:
     return name.startswith(("docProps/", "customXml/"))
 
 
+def _is_ooxml_text_part(name: str, fmt: str) -> bool:
+    """Match exactly the XML namespaces that the corresponding cleaner scans."""
+    prefix = {"docx": "word/", "xlsx": "xl/", "pptx": "ppt/"}.get(fmt)
+    return bool(prefix and name.startswith(prefix) and name.lower().endswith(".xml"))
+
+
 def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], dict]:
     findings: list[str] = []
     has_c2pa = False
     has_ai = False
     parts: list[str] = []
+    layer_a_total = 0
+    layer_a_hits: list[dict] = []
+    text_parts_scanned = 0
+    text_runs_scanned = 0
+    layer_a_truncated = False
     budget = [0]
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -865,6 +880,28 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
                         findings.append(f"{name}: {sf}")
                     continue
 
+                # Inspect the same visible OOXML text runs that clean_* later
+                # scrubs. This makes inspect/extract predict the cleaning
+                # behavior instead of silently reporting an Office document
+                # as clean and then deleting Unicode carriers from it.
+                if _is_ooxml_text_part(name, fmt):
+                    raw = _read_zip_member(zf, info, budget)
+                    text = raw.decode("utf-8", errors="replace")
+                    total, hits, scan = _inspect_office_text_part(text, fmt, name)
+                    layer_a_total += total
+                    text_parts_scanned += 1
+                    text_runs_scanned += int(scan["text_runs_scanned"])
+                    available = max(0, MAX_OFFICE_LAYER_A_HIT_GROUPS - len(layer_a_hits))
+                    layer_a_hits.extend(hits[:available])
+                    if scan["truncated"] or len(hits) > available:
+                        layer_a_truncated = True
+                    for hit in hits[:available]:
+                        findings.append(
+                            f"layer-a ({name}): {hit['codepoint']} {hit['label']} "
+                            f"x{hit['count']} ({hit['kind']})"
+                        )
+                    continue
+
                 # Only metadata/provenance parts carry AI markers. The visible
                 # body (word/*.xml, xl/*.xml, ppt/*.xml) may legitimately mention
                 # vendor names such as "Claude" without being AI-generated metadata.
@@ -893,9 +930,43 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
                 f"partial read of {fmt.upper()} zip ({exc.__class__.__name__}); "
                 "evidence above survives, later members were not scanned"
             )
-            return has_c2pa, has_ai or has_c2pa, findings, {"parts": len(parts)}
+            return (
+                has_c2pa,
+                has_ai or has_c2pa,
+                findings,
+                {
+                    "parts": len(parts),
+                    "layer_a_total": layer_a_total,
+                    "layer_a_hits": layer_a_hits,
+                    "layer_a_scan": {
+                        "scope": "visible_text_runs",
+                        "parts_scanned": text_parts_scanned,
+                        "text_runs_scanned": text_runs_scanned,
+                        "evidence_limit": MAX_OFFICE_LAYER_A_HIT_GROUPS,
+                        "truncated": True,
+                        "partial_read": True,
+                    },
+                },
+            )
         return False, False, [f"not a valid {fmt.upper()} zip"], {}
-    return has_c2pa, has_ai or has_c2pa, findings, {"parts": len(parts)}
+    return (
+        has_c2pa,
+        has_ai or has_c2pa,
+        findings,
+        {
+            "parts": len(parts),
+            "layer_a_total": layer_a_total,
+            "layer_a_hits": layer_a_hits,
+            "layer_a_scan": {
+                "scope": "visible_text_runs",
+                "parts_scanned": text_parts_scanned,
+                "text_runs_scanned": text_runs_scanned,
+                "evidence_limit": MAX_OFFICE_LAYER_A_HIT_GROUPS,
+                "truncated": layer_a_truncated,
+                "partial_read": False,
+            },
+        },
+    )
 
 
 def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
@@ -935,6 +1006,165 @@ def _decode_xml_entities(s: str) -> str:
             return m.group(0)
 
     return _XML_CHAR_REF_RE.sub(_sub, s)
+
+
+def _decode_xml_entities_with_offsets(s: str) -> tuple[str, list[int]]:
+    """Decode XML entities and retain a decoded-index -> source-index map."""
+    decoded: list[str] = []
+    source_offsets: list[int] = []
+    last = 0
+    for match in _XML_CHAR_REF_RE.finditer(s):
+        literal = s[last : match.start()]
+        decoded.extend(literal)
+        source_offsets.extend(range(last, match.start()))
+
+        token = match.group(0)
+        replacement = _decode_xml_entities(token)
+        decoded.extend(replacement)
+        if replacement == token:
+            source_offsets.extend(range(match.start(), match.end()))
+        else:
+            source_offsets.extend([match.start()] * len(replacement))
+        last = match.end()
+
+    literal = s[last:]
+    decoded.extend(literal)
+    source_offsets.extend(range(last, len(s)))
+    return "".join(decoded), source_offsets
+
+
+def _escaped_evidence_text(value: str) -> str:
+    return value.encode("unicode_escape", errors="backslashreplace").decode("ascii")
+
+
+def _office_source_fragment(source: str, offset: int) -> str:
+    entity = _XML_CHAR_REF_RE.match(source, offset)
+    if entity is not None:
+        return entity.group(0)
+    return source[offset : offset + 1]
+
+
+def _iter_office_text_segments(xml_text: str, fmt: str) -> Iterator[tuple[int, int, str]]:
+    """Return (run index, part character offset, encoded XML text) segments."""
+    if fmt == "docx":
+        blocks = _iter_tag_blocks(xml_text, re.compile(r"<w:t\b[^>]*>"), re.compile(r"</w:t>"))
+    elif fmt == "xlsx":
+        blocks = _iter_tag_blocks(xml_text, re.compile(r"<t\b[^>]*>"), re.compile(r"</t>"))
+    elif fmt == "pptx":
+        blocks = _iter_tag_blocks(xml_text, re.compile(r"<a:t\b[^>]*>"), re.compile(r"</a:t>"))
+    elif fmt == "odt":
+        run_index = 0
+        for _os, open_end, close_start, _ce in _iter_tag_blocks(
+            xml_text, re.compile(r"<text:p\b[^>]*>"), re.compile(r"</text:p>")
+        ):
+            inner = xml_text[open_end:close_start]
+            last = 0
+            for tag in re.finditer(r"<[^>]+>", inner):
+                if tag.start() > last:
+                    yield run_index, open_end + last, inner[last : tag.start()]
+                    run_index += 1
+                last = tag.end()
+            if last < len(inner):
+                yield run_index, open_end + last, inner[last:]
+        return
+    else:
+        return
+
+    for index, (_open_start, open_end, close_start, _close_end) in enumerate(blocks):
+        yield index, open_end, xml_text[open_end:close_start]
+
+
+def _utf8_offsets_at(text: str, positions: set[int]) -> dict[int, int]:
+    """Resolve bounded character positions to UTF-8 byte offsets in one pass."""
+    offsets: dict[int, int] = {}
+    byte_offset = 0
+    previous = 0
+    for position in sorted(positions):
+        byte_offset += len(text[previous:position].encode("utf-8", errors="replace"))
+        offsets[position] = byte_offset
+        previous = position
+    return offsets
+
+
+def _inspect_office_text_part(
+    xml_text: str, fmt: str, part_name: str
+) -> tuple[int, list[dict], dict]:
+    """Extract bounded, part-local Unicode evidence from visible Office text."""
+    from text_unicode import inspect_text  # local import to avoid cycles
+
+    total = 0
+    buckets: dict[tuple[int, str], dict] = {}
+    text_runs_scanned = 0
+    truncated = False
+
+    for run_index, part_start, encoded_text in _iter_office_text_segments(xml_text, fmt):
+        text_runs_scanned += 1
+        decoded_text, source_offsets = _decode_xml_entities_with_offsets(encoded_text)
+        report = inspect_text(decoded_text)
+        total += report.suspicious_total
+        for hit in report.hits:
+            key = (hit.codepoint, hit.kind)
+            if key not in buckets:
+                if len(buckets) >= MAX_OFFICE_LAYER_A_HIT_GROUPS:
+                    truncated = True
+                    continue
+                buckets[key] = {
+                    "codepoint": f"U+{hit.codepoint:04X}",
+                    "label": hit.label,
+                    "kind": hit.kind,
+                    "confidence": "informational" if hit.kind == "space" else "probable",
+                    "count": 0,
+                    "part": part_name,
+                    "samples": [],
+                }
+            bucket = buckets[key]
+            bucket["count"] += hit.count
+            samples = bucket["samples"]
+            for text_offset in hit.samples:
+                if len(samples) >= MAX_OFFICE_LAYER_A_SAMPLES_PER_HIT:
+                    break
+                source_offset = source_offsets[text_offset]
+                part_offset = part_start + source_offset
+                fragment = _office_source_fragment(encoded_text, source_offset)
+                samples.append(
+                    {
+                        "run_index": run_index,
+                        "text_character_offset": text_offset,
+                        "part_character_offset": part_offset,
+                        "source_fragment": _escaped_evidence_text(fragment),
+                        "source_utf8_hex": fragment.encode(
+                            "utf-8", errors="backslashreplace"
+                        ).hex(),
+                        "context_before": _escaped_evidence_text(
+                            decoded_text[max(0, text_offset - 16) : text_offset]
+                        ),
+                        "context_after": _escaped_evidence_text(
+                            decoded_text[text_offset + 1 : text_offset + 17]
+                        ),
+                    }
+                )
+
+    byte_offsets = _utf8_offsets_at(
+        xml_text,
+        {
+            sample["part_character_offset"]
+            for bucket in buckets.values()
+            for sample in bucket["samples"]
+        },
+    )
+    for bucket in buckets.values():
+        for sample in bucket["samples"]:
+            sample["part_utf8_byte_offset"] = byte_offsets[sample["part_character_offset"]]
+        bucket["sample_offsets"] = [sample["part_character_offset"] for sample in bucket["samples"]]
+
+    return (
+        total,
+        list(buckets.values()),
+        {
+            "text_runs_scanned": text_runs_scanned,
+            "truncated": truncated,
+        },
+    )
 
 
 def _reencode_xml_text(s: str) -> str:
@@ -1340,12 +1570,39 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
     findings: list[str] = []
     has_c2pa = False
     has_ai = False
+    parts: list[str] = []
+    layer_a_total = 0
+    layer_a_hits: list[dict] = []
+    text_parts_scanned = 0
+    text_runs_scanned = 0
+    layer_a_truncated = False
     budget = [0]
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            parts = zf.namelist()
             for info in zf.infolist():
                 _check_zip_budget(info, budget)
                 raw = _read_zip_member(zf, info, budget)
+                if info.filename == "content.xml":
+                    text = raw.decode("utf-8", errors="replace")
+                    total, hits, scan = _inspect_office_text_part(text, "odt", info.filename)
+                    layer_a_total += total
+                    text_parts_scanned += 1
+                    text_runs_scanned += int(scan["text_runs_scanned"])
+                    available = max(0, MAX_OFFICE_LAYER_A_HIT_GROUPS - len(layer_a_hits))
+                    layer_a_hits.extend(hits[:available])
+                    if scan["truncated"] or len(hits) > available:
+                        layer_a_truncated = True
+                    for hit in hits[:available]:
+                        findings.append(
+                            f"layer-a ({info.filename}): {hit['codepoint']} {hit['label']} "
+                            f"x{hit['count']} ({hit['kind']})"
+                        )
+                    # Visible prose may legitimately name an AI vendor; it is
+                    # evidence only when carried in metadata, not body text.
+                    continue
+                if info.filename == "styles.xml":
+                    continue
                 c2, ai, hits = _blob_hits(raw)
                 if c2 or ai:
                     if c2:
@@ -1353,22 +1610,49 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
                     if ai:
                         has_ai = True
                     findings.append(f"{info.filename}: {', '.join(hits[:6])}")
-            if "meta.xml" in zf.namelist():
-                meta = _read_zip_member(zf, zf.getinfo("meta.xml"), budget).decode(
-                    "utf-8", errors="replace"
-                )
-                if re.search(r"generator|claude|openai|anthropic|gemini", meta, re.I):
-                    has_ai = True
-                    findings.append("meta.xml generator-like fields")
     except _ZIP_PARSE_ERRORS as exc:
         if findings:
             findings.append(
                 f"partial read of ODT zip ({exc.__class__.__name__}); "
                 "evidence above survives, later members were not scanned"
             )
-            return has_c2pa, has_ai or has_c2pa, findings, {}
+            return (
+                has_c2pa,
+                has_ai or has_c2pa,
+                findings,
+                {
+                    "parts": len(parts),
+                    "layer_a_total": layer_a_total,
+                    "layer_a_hits": layer_a_hits,
+                    "layer_a_scan": {
+                        "scope": "visible_text_runs",
+                        "parts_scanned": text_parts_scanned,
+                        "text_runs_scanned": text_runs_scanned,
+                        "evidence_limit": MAX_OFFICE_LAYER_A_HIT_GROUPS,
+                        "truncated": True,
+                        "partial_read": True,
+                    },
+                },
+            )
         return False, False, ["not a valid ODT zip"], {}
-    return has_c2pa, has_ai or has_c2pa, findings, {}
+    return (
+        has_c2pa,
+        has_ai or has_c2pa,
+        findings,
+        {
+            "parts": len(parts),
+            "layer_a_total": layer_a_total,
+            "layer_a_hits": layer_a_hits,
+            "layer_a_scan": {
+                "scope": "visible_text_runs",
+                "parts_scanned": text_parts_scanned,
+                "text_runs_scanned": text_runs_scanned,
+                "evidence_limit": MAX_OFFICE_LAYER_A_HIT_GROUPS,
+                "truncated": layer_a_truncated,
+                "partial_read": False,
+            },
+        },
+    )
 
 
 def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
@@ -1777,6 +2061,352 @@ _XMP_PACKET_CLOSE_RE = re.compile(rb"<\?xpacket end[^?]*\?>", re.I)
 _PDF_STREAM_OPEN_RE = re.compile(rb"stream\r?\n")
 _PDF_STREAM_CLOSE_RE = re.compile(rb"endstream")
 
+# PDF image XObjects are often raw JPEG streams. PNG/WebP/TIFF signatures can
+# also occur in embedded files or in producer-specific image streams. Keep
+# this scan deliberately conservative: it only inspects recognizable image
+# signatures inside PDF stream payloads and reports them as candidates. It
+# does not pretend to decode Flate/JPEG2000/CCITT image data or to validate a
+# C2PA signature. That distinction matters because a byte signature in an
+# arbitrary stream is evidence for a follow-up check, not proof that the PDF
+# page renders that image.
+_PDF_EMBEDDED_IMAGE_MAX_BYTES = 16 << 20
+_PDF_EMBEDDED_IMAGE_MAX_CANDIDATES = 64
+_PDF_EMBEDDED_FILE_MAX_BYTES = 16 << 20
+_PDF_EMBEDDED_FILE_MAX_CANDIDATES = 32
+
+
+def _pdf_stream_dictionary(data: bytes, stream_start: int) -> bytes:
+    """Return the nearest balanced dictionary immediately before a stream."""
+    window = data[max(0, stream_start - 4096) : stream_start]
+    tokens = list(re.finditer(rb"<<|>>", window))
+    depth = 0
+    end: int | None = None
+    for token in reversed(tokens):
+        if token.group(0) == b">>":
+            if end is None:
+                end = token.end()
+            depth += 1
+        elif end is not None:
+            depth -= 1
+            if depth == 0:
+                return window[token.start() : end]
+    return b""
+
+
+def _pdf_image_candidate(data: bytes, start: int, end: int) -> dict[str, Any] | None:
+    """Inspect one recognizable image signature in a PDF stream.
+
+    Returns a bounded, JSON-safe evidence object or ``None``. The returned
+    ``offset`` is relative to the PDF, while ``stream_offset`` identifies the
+    containing stream. The source PDF remains untouched.
+    """
+    signatures = (
+        (b"\x89PNG\r\n\x1a\n", "png"),
+        (b"\xff\xd8", "jpeg"),
+        (b"RIFF", "webp"),
+        (b"II*\x00", "tiff"),
+        (b"MM\x00*", "tiff"),
+    )
+    local = data[start:end]
+    for signature, fmt in signatures:
+        at = local.find(signature)
+        if at < 0:
+            continue
+        absolute = start + at
+        bounded_end = min(end, absolute + _PDF_EMBEDDED_IMAGE_MAX_BYTES)
+        candidate = data[absolute:bounded_end]
+        if fmt == "png":
+            c2pa, ai, findings = inspect_png(candidate)
+        elif fmt == "jpeg":
+            c2pa, ai, findings = inspect_jpeg(candidate)
+        elif fmt == "webp":
+            c2pa, ai, findings = inspect_webp(candidate)
+        else:
+            c2pa, ai, findings = inspect_tiff(candidate)
+        return {
+            "format": fmt,
+            "offset": absolute,
+            "stream_offset": start,
+            "bytes_examined": len(candidate),
+            "truncated_to_budget": bounded_end < end,
+            "has_c2pa": bool(c2pa),
+            "has_ai_metadata": bool(ai),
+            "findings": findings[:20],
+            "evidence_status": "detected" if (c2pa or ai) else "not_detected",
+        }
+    return None
+
+
+def _inspect_pdf_embedded_images(data: bytes) -> dict[str, Any]:
+    """Scan raw and bounded Flate-decoded PDF streams for image candidates."""
+    candidates: list[dict[str, Any]] = []
+    streams_scanned = 0
+    flate_streams_decoded = 0
+    decode_errors: list[str] = []
+    limit_reached = False
+    for open_start, open_end, close_start, _close_end in _iter_tag_blocks(
+        data, _PDF_STREAM_OPEN_RE, _PDF_STREAM_CLOSE_RE
+    ):
+        streams_scanned += 1
+        dictionary = _pdf_stream_dictionary(data, open_start)
+        # Attachments are scanned separately with their own content-kind and
+        # Unicode/container evidence. Do not duplicate an image attachment as
+        # a page-image candidate here.
+        if re.search(rb"/Type\s*/EmbeddedFile\b", dictionary):
+            continue
+        candidate = _pdf_image_candidate(data, open_end, close_start)
+        if candidate is None and re.search(rb"/Filter\s*(?:\[\s*)?/FlateDecode\b", dictionary):
+            # The stream dictionary immediately precedes the `stream` token.
+            # Decode only Flate streams and cap output before inspection to
+            # avoid turning a compressed PDF stream into a memory amplifier.
+            payload = data[open_end:close_start].rstrip(b"\r\n")
+            try:
+                decoder = zlib.decompressobj()
+                decoded = decoder.decompress(payload, _PDF_EMBEDDED_IMAGE_MAX_BYTES + 1)
+            except zlib.error as exc:
+                decode_errors.append(f"stream@{open_end}: {exc}")
+                decoded = b""
+            if len(decoded) > _PDF_EMBEDDED_IMAGE_MAX_BYTES:
+                decode_errors.append(
+                    f"stream@{open_end}: decoded data exceeds {_PDF_EMBEDDED_IMAGE_MAX_BYTES} bytes"
+                )
+                decoded = b""
+            if decoded:
+                flate_streams_decoded += 1
+                candidate = _pdf_image_candidate(decoded, 0, len(decoded))
+                if candidate is not None:
+                    candidate["decoded_offset"] = candidate.pop("offset")
+                    candidate["offset"] = None
+                    candidate["stream_offset"] = open_end
+                    candidate["filter"] = "FlateDecode"
+        if candidate is None:
+            continue
+        candidates.append(candidate)
+        if len(candidates) >= _PDF_EMBEDDED_IMAGE_MAX_CANDIDATES:
+            limit_reached = True
+            break
+    limitations = [
+        "only raw image signatures and bounded Flate-decoded PDF streams were inspected; JPEG2000, CCITT and other encoded XObjects require a PDF renderer",
+    ]
+    if limit_reached:
+        limitations.append("embedded image candidate limit reached")
+    if decode_errors:
+        limitations.append(
+            f"{len(decode_errors)} Flate stream(s) could not be safely decoded; see decode_errors"
+        )
+    return {
+        "streams_scanned": streams_scanned,
+        "flate_streams_decoded": flate_streams_decoded,
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "decode_errors": decode_errors[:20],
+        "limitations": limitations,
+    }
+
+
+def _pdf_name_value(dictionary: bytes, key: bytes) -> str | None:
+    match = re.search(rb"/" + re.escape(key) + rb"\s*/([^\s<>{}\[\]()/]+)", dictionary)
+    if match is None:
+        return None
+    raw = re.sub(
+        rb"#([0-9A-Fa-f]{2})",
+        lambda item: bytes([int(item.group(1), 16)]),
+        match.group(1),
+    )
+    return raw.decode("latin-1", errors="replace")
+
+
+def _looks_like_utf8_text(data: bytes) -> bool:
+    if not data or b"\x00" in data[:65536]:
+        return False
+    sample = data[:65536]
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    controls = sum(byte < 9 or 13 < byte < 32 for byte in sample)
+    return controls <= max(2, len(sample) // 100)
+
+
+def _inspect_pdf_embedded_payload(payload: bytes) -> dict[str, Any]:
+    """Run bounded, non-recursive inspection on one decoded PDF attachment."""
+    result: dict[str, Any] = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+        "kind": "unknown",
+        "evidence_status": "inconclusive",
+        "has_c2pa": False,
+        "has_ai_metadata": False,
+        "findings": [],
+    }
+
+    image_fmt = detect_image_format(payload)
+    if image_fmt != "unknown":
+        c2pa, ai, findings = False, False, []
+        if image_fmt == "png":
+            c2pa, ai, findings = inspect_png(payload)
+        elif image_fmt == "jpeg":
+            c2pa, ai, findings = inspect_jpeg(payload)
+        elif image_fmt == "webp":
+            c2pa, ai, findings = inspect_webp(payload)
+        elif image_fmt in ("avif", "heic"):
+            c2pa, ai, findings = inspect_isobmff(payload, image_fmt)
+        elif image_fmt == "gif":
+            c2pa, ai, findings = inspect_gif(payload)
+        elif image_fmt == "tiff":
+            c2pa, ai, findings = inspect_tiff(payload)
+        elif image_fmt == "bmp":
+            c2pa, ai, findings = inspect_bmp(payload)
+        result.update(
+            {
+                "kind": "image",
+                "format": image_fmt,
+                "has_c2pa": bool(c2pa),
+                "has_ai_metadata": bool(ai),
+                "findings": findings[:20],
+                "evidence_status": "detected" if (c2pa or ai) else "not_detected",
+            }
+        )
+        return result
+
+    fmt = detect_container_format(Path("attachment"), payload)
+    if fmt in ("docx", "xlsx", "pptx", "odt", "epub", "svg"):
+        if fmt == "docx":
+            c2pa, ai, findings, details = inspect_docx(payload)
+        elif fmt == "xlsx":
+            c2pa, ai, findings, details = inspect_xlsx(payload)
+        elif fmt == "pptx":
+            c2pa, ai, findings, details = inspect_pptx(payload)
+        elif fmt == "odt":
+            c2pa, ai, findings, details = inspect_odt(payload)
+        elif fmt == "epub":
+            c2pa, ai, findings, details = inspect_epub(payload)
+        else:
+            c2pa, ai, findings, details = inspect_svg(payload)
+        layer_total = int(details.get("layer_a_total", 0))
+        result.update(
+            {
+                "kind": "container",
+                "format": fmt,
+                "has_c2pa": bool(c2pa),
+                "has_ai_metadata": bool(ai),
+                "findings": findings[:20],
+                "layer_a_total": layer_total,
+                "layer_a_hits": list(details.get("layer_a_hits", [])),
+                "evidence_status": "detected" if (c2pa or ai or layer_total) else "not_detected",
+            }
+        )
+        return result
+
+    if fmt == "pdf":
+        result.update(
+            {
+                "kind": "container",
+                "format": "pdf",
+                "limitation": "nested PDF attachments are identified but not recursively parsed",
+            }
+        )
+        return result
+
+    if _looks_like_utf8_text(payload):
+        from text_unicode import inspect_text  # local import to avoid cycles
+
+        text_report = inspect_text(payload.decode("utf-8")).to_dict()
+        result.update(
+            {
+                "kind": "text",
+                "format": "utf-8",
+                "layer_a_total": text_report["suspicious_total"],
+                "layer_a_hits": text_report["hits"],
+                "evidence_status": "detected"
+                if text_report["suspicious_total"]
+                else "not_detected",
+            }
+        )
+    return result
+
+
+def _inspect_pdf_embedded_files(data: bytes) -> dict[str, Any]:
+    """Identify /EmbeddedFile streams and inspect raw/Flate payloads safely."""
+    candidates: list[dict[str, Any]] = []
+    decode_errors: list[str] = []
+    limit_reached = False
+    for open_start, open_end, close_start, _close_end in _iter_tag_blocks(
+        data, _PDF_STREAM_OPEN_RE, _PDF_STREAM_CLOSE_RE
+    ):
+        dictionary = _pdf_stream_dictionary(data, open_start)
+        if not re.search(rb"/Type\s*/EmbeddedFile\b", dictionary):
+            continue
+        if len(candidates) >= _PDF_EMBEDDED_FILE_MAX_CANDIDATES:
+            limit_reached = True
+            break
+
+        encoded = data[open_end:close_start].rstrip(b"\r\n")
+        filters = re.findall(
+            rb"/(FlateDecode|ASCII85Decode|ASCIIHexDecode|LZWDecode)\b", dictionary
+        )
+        filter_names = [value.decode("ascii") for value in filters]
+        candidate: dict[str, Any] = {
+            "stream_offset": open_end,
+            "encoded_size": len(encoded),
+            "subtype": _pdf_name_value(dictionary, b"Subtype"),
+            "filters": filter_names,
+            "evidence_status": "inconclusive",
+        }
+
+        payload: bytes | None = None
+        if not filter_names:
+            if len(encoded) <= _PDF_EMBEDDED_FILE_MAX_BYTES:
+                payload = encoded
+            else:
+                candidate["limitation"] = (
+                    f"raw attachment exceeds {_PDF_EMBEDDED_FILE_MAX_BYTES} byte scan limit"
+                )
+        elif filter_names == ["FlateDecode"]:
+            try:
+                decoder = zlib.decompressobj()
+                decoded = decoder.decompress(encoded, _PDF_EMBEDDED_FILE_MAX_BYTES + 1)
+                if len(decoded) > _PDF_EMBEDDED_FILE_MAX_BYTES or decoder.unconsumed_tail:
+                    candidate["limitation"] = (
+                        f"decoded attachment exceeds {_PDF_EMBEDDED_FILE_MAX_BYTES} byte scan limit"
+                    )
+                elif not decoder.eof:
+                    candidate["limitation"] = "attachment Flate stream is incomplete"
+                else:
+                    payload = decoded
+            except zlib.error as exc:
+                error = f"stream@{open_end}: {exc}"
+                decode_errors.append(error)
+                candidate["error"] = error
+        else:
+            candidate["limitation"] = "attachment filter chain is not supported"
+
+        if payload is not None:
+            candidate["decoded_size"] = len(payload)
+            candidate["content"] = _inspect_pdf_embedded_payload(payload)
+            candidate["evidence_status"] = candidate["content"]["evidence_status"]
+        candidates.append(candidate)
+
+    limitations = [
+        "PDF attachments are recognized from direct /EmbeddedFile streams; object streams, encrypted attachments, Filespec filename mapping, and non-Flate filter chains require a full PDF parser",
+    ]
+    if limit_reached:
+        limitations.append("embedded file candidate limit reached")
+    if decode_errors:
+        limitations.append(
+            f"{len(decode_errors)} embedded file stream(s) could not be safely decoded"
+        )
+    return {
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "detected_count": sum(
+            candidate["evidence_status"] == "detected" for candidate in candidates
+        ),
+        "decode_errors": decode_errors[:20],
+        "limitations": limitations,
+        "candidate_limit": _PDF_EMBEDDED_FILE_MAX_CANDIDATES,
+    }
+
 
 def _pdf_structured_blob(data: bytes) -> bytes:
     """Return PDF bytes with stream payloads removed, plus XMP packets.
@@ -1818,6 +2448,25 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
                 re.I,
             )
         )
+    embedded = _inspect_pdf_embedded_images(data)
+    for candidate in embedded["candidates"]:
+        if candidate["has_c2pa"] or candidate["has_ai_metadata"]:
+            findings.append(
+                f"pdf-embedded-image@{candidate['offset']}:{candidate['format']}: "
+                f"{', '.join(candidate['findings'][:8]) or 'AI/provenance metadata'}"
+            )
+        has_c2pa = has_c2pa or candidate["has_c2pa"]
+        has_ai = has_ai or candidate["has_ai_metadata"]
+    embedded_files = _inspect_pdf_embedded_files(data)
+    for candidate in embedded_files["candidates"]:
+        content = candidate.get("content") or {}
+        if candidate["evidence_status"] == "detected":
+            findings.append(
+                f"pdf-embedded-file@{candidate['stream_offset']}: "
+                f"{content.get('kind', 'unknown')} {content.get('format', '')}".rstrip()
+            )
+        has_c2pa = has_c2pa or bool(content.get("has_c2pa"))
+        has_ai = has_ai or bool(content.get("has_ai_metadata"))
     tools = run_optional_tools(path)
     ct = tools.get("c2patool") or {}
     if ct.get("has_manifest"):
@@ -1826,7 +2475,16 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     probe_note = c2patool_probe_note(tools)
     if probe_note:
         findings.append(probe_note)
-    return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools}
+    return (
+        has_c2pa,
+        has_ai or has_c2pa,
+        findings,
+        {
+            "tools": tools,
+            "embedded_images": embedded,
+            "embedded_files": embedded_files,
+        },
+    )
 
 
 def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
@@ -1979,6 +2637,9 @@ def inspect_container(path: Path) -> ContainerInspectReport:
         layer_a_hits = ta["hits"]
         for h in layer_a_hits:
             findings.append(f"layer-a: {h['codepoint']} {h['label']} x{h['count']} ({h['kind']})")
+    elif fmt in ("docx", "xlsx", "pptx", "odt"):
+        layer_a_total = int(details.get("layer_a_total", 0))
+        layer_a_hits = list(details.get("layer_a_hits", []))
     elif fmt == "epub":
         from text_unicode import inspect_text  # local import to avoid cycles
 
@@ -2011,7 +2672,11 @@ def inspect_container(path: Path) -> ContainerInspectReport:
             "PDF inspection is best-effort; exiftool/c2patool give more reliable metadata detection"
         )
     elif fmt in ("docx", "xlsx", "pptx"):
-        notes.append(f"{fmt.upper()}: metadata/provenance and embedded media are scanned")
+        notes.append(
+            f"{fmt.upper()}: visible text, metadata/provenance, and embedded media are scanned"
+        )
+    elif fmt == "odt":
+        notes.append("ODT: visible text and metadata/provenance parts are scanned")
     elif fmt == "epub":
         notes.append(
             "EPUB: package-document metadata, XHTML meta/JSON-LD, and embedded media are scanned"

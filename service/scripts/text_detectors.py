@@ -48,6 +48,7 @@ from detect_gumbel import DEFAULT_THRESHOLD, DEFAULT_WINDOW, detect_text
 
 DEFAULT_MARKLLM_SCHEME = "kgw"
 DEFAULT_MARKLLM_TIMEOUT = 600.0
+DETECTION_STATUSES = frozenset({"detected", "not_detected", "inconclusive", "unavailable", "error"})
 
 
 class TextDetector(Protocol):
@@ -56,6 +57,46 @@ class TextDetector(Protocol):
     def available(self) -> bool: ...
 
     def detect(self, text: str) -> dict[str, Any]: ...
+
+
+def normalize_detector_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Attach the five-state detector status without changing legacy fields.
+
+    ``available: false`` used to be rendered as if it were a clean result by
+    some clients. Keep the old boolean for compatibility, but make the
+    distinction explicit: missing configuration/vendor endpoints are
+    ``unavailable``; an actual execution failure is ``error``; a successful
+    boolean verdict is ``detected`` or ``not_detected``; and insufficient
+    evidence is ``inconclusive``.
+    """
+    result = dict(report)
+    current = result.get("status")
+    if current in DETECTION_STATUSES:
+        return result
+
+    if result.get("available") is False:
+        error = str(result.get("error", "")).lower()
+        unavailable_markers = (
+            "not set",
+            "no public endpoint",
+            "not configured",
+            "unavailable",
+            "retired",
+        )
+        result["status"] = (
+            "unavailable" if any(marker in error for marker in unavailable_markers) else "error"
+        )
+        return result
+
+    if result.get("is_watermarked") is True:
+        result["status"] = "detected"
+    elif result.get("is_watermarked") is False:
+        result["status"] = "not_detected"
+    else:
+        raw_status = result.get("status")
+        result["status_detail"] = raw_status or "no boolean verdict"
+        result["status"] = "inconclusive"
+    return result
 
 
 def _env_float(name: str, default: float) -> float:
@@ -400,7 +441,7 @@ def run_all_text_detectors(
     exclude the MarkLLM harness entirely. Same for gumbel.
     """
     return [
-        d.detect(text)
+        normalize_detector_report(d.detect(text))
         for d in all_detectors(
             markllm,
             include_markllm=include_markllm,
@@ -420,7 +461,7 @@ def run_text_detectors(
 ) -> list[dict[str, Any]]:
     """Run only the detectors that are configured and usable."""
     return [
-        d.detect(text)
+        normalize_detector_report(d.detect(text))
         for d in all_detectors(
             markllm,
             include_markllm=include_markllm,

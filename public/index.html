@@ -1,15 +1,15 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="dark" data-theme-preference="system">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta id="theme-color" name="theme-color" content="#050505" />
+    <meta id="theme-color" name="theme-color" content="#111214" />
     <meta
       name="description"
       content="清理文本、图片、视频和文档中的隐藏标记与 provenance metadata。"
     />
-    <link rel="canonical" href="https://remove-watermark.page.dev/" />
-    <link rel="stylesheet" href="/styles.css?v=20260822-7" />
+    <link rel="canonical" href="https://remove-watermark-ddj.pages.dev/" />
+    <link rel="stylesheet" href="/styles.css?v=20260823-3" />
     <title>Remove Watermark · 文本与文件净化</title>
   </head>
   <body>
@@ -46,14 +46,19 @@
           </select>
         </label>
         <label class="header-select" title="Theme">
-          <span class="header-select-icon" aria-hidden="true">◐</span>
+          <span class="theme-swatch" aria-hidden="true"></span>
           <span class="sr-only" data-i18n="theme_label">主题</span>
           <select id="theme-select" aria-label="Theme" data-i18n-aria-label="theme_label">
-            <option value="dark" data-i18n="theme_dark">深色</option>
+            <option value="system" data-i18n="theme_system">系统</option>
             <option value="light" data-i18n="theme_light">浅色</option>
-            <option value="midnight" data-i18n="theme_midnight">午夜蓝</option>
-            <option value="forest" data-i18n="theme_forest">森林绿</option>
-            <option value="violet" data-i18n="theme_violet">紫罗兰</option>
+            <option value="dark" data-i18n="theme_dark">深色</option>
+            <option value="anthropic" data-i18n="theme_anthropic">暖杏</option>
+            <option value="rose" data-i18n="theme_rose">玫瑰花园</option>
+            <option value="lake" data-i18n="theme_lake">湖光</option>
+            <option value="sunset" data-i18n="theme_sunset">日落霞光</option>
+            <option value="forest" data-i18n="theme_forest">森林低语</option>
+            <option value="sea" data-i18n="theme_sea">海风</option>
+            <option value="lavender" data-i18n="theme_lavender">薰衣草梦</option>
           </select>
         </label>
       </div>
@@ -316,15 +321,15 @@
         </div>
         <div class="faq-list">
           <details>
-            <summary><span data-i18n="faq1_q">文件会保存在哪里？</span><span aria-hidden="true">⌄</span></summary>
+            <summary><span class="faq-question" data-i18n="faq1_q">文件会保存在哪里？</span><span class="faq-chevron" aria-hidden="true">⌄</span></summary>
             <p data-i18n="faq1_a">页面不会建立原始文件列表。文件只在当前请求和处理流程中使用，结果返回后由浏览器决定是否下载。</p>
           </details>
           <details>
-            <summary><span data-i18n="faq2_q">图片和视频会显示什么结果？</span><span aria-hidden="true">⌄</span></summary>
+            <summary><span class="faq-question" data-i18n="faq2_q">图片和视频会显示什么结果？</span><span class="faq-chevron" aria-hidden="true">⌄</span></summary>
             <p data-i18n="faq2_a">右侧会先显示处理类型和检测到的标记，随后提供修正后的文件副本；图片和视频还会显示浏览器预览。</p>
           </details>
           <details>
-            <summary><span data-i18n="faq3_q">能去掉画面里肉眼可见的水印吗？</span><span aria-hidden="true">⌄</span></summary>
+            <summary><span class="faq-question" data-i18n="faq3_q">能去掉画面里肉眼可见的水印吗？</span><span class="faq-chevron" aria-hidden="true">⌄</span></summary>
             <p data-i18n="faq3_a">当前默认流程主要处理隐藏字符、provenance 和 metadata。画面内可见水印需要项目中已配置对应的像素级后端能力。</p>
           </details>
         </div>
@@ -359,7 +364,7 @@
     </main>
 
     <footer class="site-footer shell">
-      <span>remove-watermark.page.dev</span>
+      <span>remove-watermark-ddj.pages.dev</span>
       <span data-i18n="footer_storage">no original file storage</span>
     </footer>
 
@@ -368,7 +373,7 @@
       <span data-i18n="back_to_top">顶部</span>
     </button>
 
-    <script src="/i18n.js?v=20260822-2" defer></script>
-    <script src="/app.js?v=20260822-7" defer></script>
+    <script src="/i18n.js?v=20260823-2" defer></script>
+    <script src="/app.js?v=20260823-3" defer></script>
   </body>
 </html>

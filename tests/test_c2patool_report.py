@@ -84,6 +84,19 @@ def test_real_manifest_is_detected(monkeypatch, tmp_path):
     assert tools["c2patool"]["has_manifest"] is True
 
 
+def test_real_manifest_json_is_reduced_to_structured_evidence(monkeypatch, tmp_path):
+    _fake_c2patool(monkeypatch, MANIFEST_OUTPUT, 0)
+    path = tmp_path / "signed.png"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    summary = image_meta.run_optional_tools(path)["c2patool"]["json_summary"]
+
+    assert summary["active_manifest"] == "urn:c2pa:0000"
+    assert summary["manifest_ids"] == ["urn:c2pa:0000"]
+    assert summary["manifests"][0]["claim_generator"] == "some_tool/1.0"
+    assert summary["manifests"][0]["assertion_labels"] == ["c2pa.actions"]
+
+
 def test_missing_c2patool_is_reported_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(image_meta, "which", lambda cmd: None)
     path = tmp_path / "any.png"

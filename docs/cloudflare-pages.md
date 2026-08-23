@@ -9,7 +9,7 @@ cleaners.
 ## Architecture
 
 ```text
-browser → https://remove-watermark.page.dev/
+browser → https://remove-watermark-ddj.pages.dev/
              ├── static UI (Cloudflare Pages)
              └── /api/* (Pages Function) → WATERMARKS_BACKEND_URL
                                            → service/scripts/server.py
@@ -37,6 +37,10 @@ The proxy route allow-list must stay in parity with `service/scripts/server.py`:
 | `/openapi.json` | `/api/openapi.json` | GET |
 | `/inspect` | `/api/inspect` | POST |
 | `/detect` | `/api/detect` | POST |
+| `/extract` | `/api/extract` | POST |
+| `/extract/batch` | `/api/extract/batch` | POST |
+| `/v1/extract` | `/api/v1/extract` | POST |
+| `/v1/extract/batch` | `/api/v1/extract/batch` | POST |
 | `/clean` | `/api/clean` | POST |
 | `/inspect/batch` | `/api/inspect/batch` | POST |
 | `/detect/batch` | `/api/detect/batch` | POST |
@@ -46,6 +50,11 @@ Do not add a second cleaning implementation to `public/app.js`: the client
 only encodes the file, forwards the request, and renders the returned report
 and cleaned bytes. This preserves new `main` formats and options when the
 Python service is updated.
+
+The Pages Function validates or generates `X-Request-ID`, forwards it to the
+Python backend, and preserves it in both the response header and JSON error
+body. This correlates edge failures and backend evidence without exposing the
+backend credential or storing uploaded originals.
 
 ## 1. Run the backend
 
@@ -93,18 +102,26 @@ production variables:
 | `WATERMARKS_BACKEND_API_KEY` | Secret | the same value as `WATERMARKS_SERVER_API_KEY` |
 
 After saving variables, create a new deployment so the Function picks them up.
-Check `https://remove-watermark.page.dev/api/health` before testing uploads.
+Check `https://remove-watermark-ddj.pages.dev/api/health` before testing uploads.
 
-## 3. Attach the custom domain
+## 3. Production URL and optional custom domain
 
-In **Pages → remove-watermark → Custom domains**, add:
+The current production URL is:
+
+```text
+https://remove-watermark-ddj.pages.dev/
+```
+
+It is also embedded as the canonical URL in `public/index.html` and does not
+require a separate DNS record. If a separately owned custom domain is desired,
+attach it in **Pages → remove-watermark → Custom domains** and follow the DNS
+validation shown by Cloudflare.
+
+The previously proposed optional custom domain was:
 
 ```text
 remove-watermark.page.dev
 ```
-
-Follow the DNS validation shown by Cloudflare. The target URL is also embedded
-as the canonical URL in `public/index.html`.
 
 For the Pages project created from this branch, the current DNS record is:
 
@@ -112,7 +129,7 @@ For the Pages project created from this branch, the current DNS record is:
 | --- | --- | --- | --- |
 | CNAME | `remove-watermark` | `remove-watermark-ddj.pages.dev` | DNS-only while validating |
 
-That record makes `remove-watermark.page.dev` resolve to this Pages project.
+That record would make `remove-watermark.page.dev` resolve to this Pages project.
 The Pages custom-domain status should change from `pending` after DNS
 propagation and certificate issuance. If `page.dev` is managed in another
 Cloudflare account or at another DNS provider, add the record there; the

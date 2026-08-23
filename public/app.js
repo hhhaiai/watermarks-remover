@@ -10,20 +10,64 @@
   const API_BASE = (window.WATERMARKS_API_BASE || "/api").replace(/\/+$/, "");
   const I18N = window.REMOVE_WATERMARK_I18N || {};
   const SUPPORTED_LOCALES = Object.keys(I18N);
-  const SUPPORTED_THEMES = ["dark", "light", "midnight", "forest", "violet"];
+  const SUPPORTED_THEMES = [
+    "system",
+    "light",
+    "dark",
+    "anthropic",
+    "rose",
+    "lake",
+    "sunset",
+    "forest",
+    "sea",
+    "lavender",
+  ];
+  const LEGACY_THEME_MAP = {
+    midnight: "sea",
+    violet: "lavender",
+  };
+  const SYSTEM_THEME_QUERY = typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-color-scheme: light)")
+    : null;
   const LOCAL_REMOVABLE_MARKS = new Map([
     [0x00ad, "U+00AD SOFT HYPHEN"],
     [0x200b, "U+200B ZERO WIDTH SPACE"],
     [0xfeff, "U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM"],
   ]);
 
+  function detectBrowserLocale() {
+    const candidates = [];
+    if (Array.isArray(window.navigator.languages)) {
+      candidates.push(...window.navigator.languages);
+    }
+    if (window.navigator.language) candidates.push(window.navigator.language);
+
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || !candidate.trim()) continue;
+      const normalized = candidate.trim().replace(/_/g, "-").toLowerCase();
+      const exact = SUPPORTED_LOCALES.find((locale) => locale.toLowerCase() === normalized);
+      if (exact) return exact;
+
+      const language = normalized.split("-")[0];
+      if (language === "zh" && SUPPORTED_LOCALES.includes("zh-CN")) return "zh-CN";
+      if (language === "pt" && SUPPORTED_LOCALES.includes("pt-BR")) return "pt-BR";
+      const baseMatch = SUPPORTED_LOCALES.find(
+        (locale) => locale.toLowerCase().split("-")[0] === language,
+      );
+      if (baseMatch) return baseMatch;
+    }
+
+    return SUPPORTED_LOCALES.includes("en") ? "en" : "zh-CN";
+  }
+
   const state = {
     attachment: null,
     busy: false,
     backendAvailable: null,
     previewUrl: null,
-    locale: "zh-CN",
-    theme: "dark",
+    locale: detectBrowserLocale(),
+    localePreference: "browser",
+    theme: "system",
     serviceState: "checking",
     outputModel: null,
     capabilities: null,
@@ -32,8 +76,12 @@
   try {
     const storedLocale = window.localStorage.getItem("remove-watermark-locale");
     const storedTheme = window.localStorage.getItem("remove-watermark-theme");
-    if (SUPPORTED_LOCALES.includes(storedLocale)) state.locale = storedLocale;
-    if (SUPPORTED_THEMES.includes(storedTheme)) state.theme = storedTheme;
+    const normalizedTheme = LEGACY_THEME_MAP[storedTheme] || storedTheme;
+    if (SUPPORTED_LOCALES.includes(storedLocale)) {
+      state.locale = storedLocale;
+      state.localePreference = "manual";
+    }
+    if (SUPPORTED_THEMES.includes(normalizedTheme)) state.theme = normalizedTheme;
   } catch {
     // Private browsing can disable localStorage; the default settings still work.
   }
@@ -122,19 +170,26 @@
     }
   }
 
+  function resolveTheme(theme) {
+    if (theme === "system") {
+      return SYSTEM_THEME_QUERY && SYSTEM_THEME_QUERY.matches ? "light" : "dark";
+    }
+    return theme;
+  }
+
   function applyTheme(theme) {
-    if (!SUPPORTED_THEMES.includes(theme)) theme = "dark";
+    if (!SUPPORTED_THEMES.includes(theme)) theme = "system";
+    const resolvedTheme = resolveTheme(theme);
     state.theme = theme;
-    document.documentElement.dataset.theme = theme;
+    document.documentElement.dataset.themePreference = theme;
+    document.documentElement.dataset.theme = resolvedTheme;
     if (themeSelect) themeSelect.value = theme;
-    const colors = {
-      dark: "#050505",
-      light: "#f4f6fb",
-      midnight: "#07111f",
-      forest: "#07110c",
-      violet: "#100918",
-    };
-    if (themeColor) themeColor.content = colors[theme];
+    if (themeColor) {
+      const background = window.getComputedStyle(document.documentElement)
+        .getPropertyValue("--bg")
+        .trim();
+      if (background) themeColor.content = background;
+    }
   }
 
   function setServiceStatus(stateName, text) {
@@ -381,6 +436,15 @@
       }
     }
 
+    if (report && report.validation && typeof report.validation === "object") {
+      const validation = report.validation;
+      lines.push(
+        t("validation_label") + ": "
+        + (validation.ok ? t("validation_ok") : t("validation_failed")),
+      );
+      if (validation.error) lines.push("  " + t("error_label") + ": " + validation.error);
+    }
+
     if (report && report.text_detectors && !Array.isArray(report.text_detectors)) {
       for (const [phase, items] of Object.entries(report.text_detectors)) {
         if (!Array.isArray(items) || !items.length) continue;
@@ -394,6 +458,78 @@
       const score = report && report[phase];
       if (!score || typeof score !== "object") continue;
       lines.push(...detectionLines({ detections: [{ ...score, detector: "synthid " + label }] }));
+    }
+
+    if (detection && Array.isArray(detection.evidence)) {
+      if (detection.source && detection.source.sha256) {
+        lines.push(
+          t("source_hash_label") + ": "
+          + detection.source.sha256.slice(0, 16) + "…",
+        );
+      }
+      lines.push(t("evidence_items_label") + ": " + detection.evidence.length);
+      const occurrences = detection.evidence.filter((item) => (
+        item && item.layer === "unicode" && typeof item.character_offset === "number"
+      ));
+      if (occurrences.length) {
+        lines.push(t("evidence_label") + ": " + occurrences.length);
+        occurrences.slice(0, 8).forEach((item) => {
+          lines.push(
+            "  " + item.codepoint + " @ char " + item.character_offset
+            + " / byte " + item.byte_offset,
+          );
+        });
+      }
+      const packageOccurrences = detection.evidence.filter((item) => (
+        item && item.layer === "unicode" && typeof item.part === "string"
+        && Array.isArray(item.samples) && item.samples.length
+      ));
+      packageOccurrences.slice(0, 8).forEach((item) => {
+        const sample = item.samples[0];
+        lines.push(
+          "  " + item.codepoint + " · " + t("part_label") + " " + item.part
+          + " · " + t("offset_label") + " " + sample.part_character_offset,
+        );
+      });
+      const embeddedFiles = detection.evidence.filter((item) => (
+        item && item.extractor === "PDFEmbeddedFileExtractor"
+      ));
+      embeddedFiles.slice(0, 6).forEach((item) => {
+        const content = item.content || {};
+        const subtype = item.subtype || content.format || content.kind || "unknown";
+        lines.push(
+          "  " + t("embedded_file_label") + " · " + subtype
+          + " · " + (item.status || "inconclusive"),
+        );
+      });
+      const summarized = detection.evidence
+        .filter((item) => (
+          item && typeof item.extractor === "string"
+          && typeof item.character_offset !== "number"
+          && typeof item.part !== "string"
+          && item.extractor !== "PDFEmbeddedFileExtractor"
+        ))
+        .slice(0, 10);
+      summarized.forEach((item) => {
+        const detail = item.error
+          || (Array.isArray(item.findings) && item.findings.length ? item.findings[0] : "");
+        lines.push(
+          "  " + item.extractor + " · " + (item.status || "unknown")
+          + (detail ? " · " + String(detail).slice(0, 160) : ""),
+        );
+      });
+      if (Array.isArray(detection.limitations) && detection.limitations.length) {
+        lines.push(t("limitations_label") + ":");
+        detection.limitations.slice(0, 8).forEach((item) => {
+          lines.push("  · " + String(item).slice(0, 180));
+        });
+      }
+      if (detection.verdict) {
+        const coverage = typeof detection.coverage === "number"
+          ? " · " + t("coverage_label") + " " + Math.round(detection.coverage * 100) + "%"
+          : "";
+        lines.push(t("verdict_label") + ": " + detection.verdict + coverage);
+      }
     }
 
     lines.push(...detectionLines(detection));
@@ -602,7 +738,16 @@
   function mergeCleanReport(report, cleanReport) {
     if (!cleanReport || typeof cleanReport !== "object") return report;
     const merged = { ...report };
-    for (const key of ["stats", "text_detectors", "synthid_before", "synthid_after"]) {
+    for (const key of [
+      "stats",
+      "text_detectors",
+      "synthid_before",
+      "synthid_after",
+      "validation",
+      "source_sha256",
+      "output_sha256",
+      "actions",
+    ]) {
       if (Object.prototype.hasOwnProperty.call(cleanReport, key)) {
         merged[key] = cleanReport[key];
       }
@@ -668,20 +813,51 @@
   }
 
   async function inspectWithDetection(payload) {
-    const inspected = await request("/inspect", payload);
-    let detection;
     try {
-      detection = await request("/detect", {
-        file: payload.file,
-        name: payload.name,
-      });
-    } catch (error) {
-      detection = {
-        ok: false,
-        error: error.message || "检测器未连接",
+      let extracted;
+      try {
+        extracted = await request("/v1/extract", payload);
+      } catch {
+        // Compatibility with a backend that has /extract but predates the
+        // versioned Evidence Schema route.
+        extracted = await request("/extract", payload);
+      }
+      return {
+        inspected: {
+          ok: true,
+          kind: extracted.source && extracted.source.kind,
+          suspicious: extracted.verdict === "detected",
+          report: extracted.report || {},
+        },
+        detection: {
+          ok: true,
+          kind: extracted.source && extracted.source.kind,
+          source: extracted.source || {},
+          detections: extracted.detections || [],
+          evidence: extracted.evidence || [],
+          limitations: extracted.limitations || [],
+          verdict: extracted.verdict,
+          coverage: extracted.coverage,
+        },
       };
+    } catch {
+      // Keep compatibility with an older backend while the Pages deployment
+      // rolls forward: the legacy pair has the same read-only semantics.
+      const inspected = await request("/inspect", payload);
+      let detection;
+      try {
+        detection = await request("/detect", {
+          file: payload.file,
+          name: payload.name,
+        });
+      } catch (error) {
+        detection = {
+          ok: false,
+          error: error.message || "检测器未连接",
+        };
+      }
+      return { inspected, detection };
     }
-    return { inspected, detection };
   }
 
   async function processTextScan(value, localOnly) {
@@ -907,14 +1083,28 @@
   submitButton.addEventListener("click", () => submit(false));
   languageSelect.addEventListener("change", () => {
     state.locale = languageSelect.value;
+    state.localePreference = "manual";
     try { window.localStorage.setItem("remove-watermark-locale", state.locale); } catch {}
     applyLanguage(state.locale);
+  });
+  window.addEventListener("languagechange", () => {
+    if (state.localePreference === "browser") applyLanguage(detectBrowserLocale());
   });
   themeSelect.addEventListener("change", () => {
     state.theme = themeSelect.value;
     try { window.localStorage.setItem("remove-watermark-theme", state.theme); } catch {}
     applyTheme(state.theme);
   });
+  if (SYSTEM_THEME_QUERY) {
+    const handleSystemThemeChange = () => {
+      if (state.theme === "system") applyTheme("system");
+    };
+    if (typeof SYSTEM_THEME_QUERY.addEventListener === "function") {
+      SYSTEM_THEME_QUERY.addEventListener("change", handleSystemThemeChange);
+    } else if (typeof SYSTEM_THEME_QUERY.addListener === "function") {
+      SYSTEM_THEME_QUERY.addListener(handleSystemThemeChange);
+    }
+  }
   backToTop.addEventListener("click", () => {
     window.scrollTo({ top: 0, behavior: "smooth" });
   });

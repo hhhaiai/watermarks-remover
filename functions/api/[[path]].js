@@ -4,6 +4,10 @@ const ALLOWED_ROUTES = new Map([
   ["GET /openapi.json", true],
   ["POST /inspect", true],
   ["POST /detect", true],
+  ["POST /extract", true],
+  ["POST /extract/batch", true],
+  ["POST /v1/extract", true],
+  ["POST /v1/extract/batch", true],
   ["POST /clean", true],
   ["POST /inspect/batch", true],
   ["POST /detect/batch", true],
@@ -21,12 +25,21 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 
-function jsonResponse(status, payload) {
-  return new Response(JSON.stringify(payload), {
+function requestId(request) {
+  const incoming = (request.headers.get("x-request-id") || "").trim();
+  if (incoming && incoming.length <= 128 && /^[A-Za-z0-9._:-]+$/.test(incoming)) {
+    return incoming;
+  }
+  return `wm_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`;
+}
+
+function jsonResponse(status, payload, requestIdValue) {
+  return new Response(JSON.stringify({ request_id: requestIdValue, ...payload }), {
     status,
     headers: {
       "Cache-Control": "no-store",
       "Content-Type": "application/json; charset=utf-8",
+      "X-Request-ID": requestIdValue,
     },
   });
 }
@@ -58,13 +71,14 @@ function backendTarget(rawBase, path, search) {
   return base;
 }
 
-function forwardedHeaders(request, env) {
+function forwardedHeaders(request, env, requestIdValue) {
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
   headers.delete("cf-connecting-ip");
   headers.delete("cf-ray");
   headers.delete("cf-visitor");
+  headers.set("X-Request-ID", requestIdValue);
 
   // The browser never needs to know the backend credential. When configured,
   // the Pages Function replaces any client-supplied Authorization header.
@@ -79,22 +93,24 @@ function forwardedHeaders(request, env) {
   return headers;
 }
 
-function responseHeaders(upstream) {
+function responseHeaders(upstream, requestIdValue) {
   const headers = new Headers();
   for (const [name, value] of upstream.headers) {
     if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   }
   headers.set("Cache-Control", "no-store");
+  if (!headers.has("X-Request-ID")) headers.set("X-Request-ID", requestIdValue);
   return headers;
 }
 
 export async function onRequest(context) {
   const { request, env } = context;
+  const requestIdValue = requestId(request);
   const path = routePath(context);
   const method = request.method.toUpperCase();
 
   if (!ALLOWED_ROUTES.has(`${method} ${path}`)) {
-    return jsonResponse(404, { ok: false, error: "not found" });
+    return jsonResponse(404, { ok: false, error: "not found" }, requestIdValue);
   }
 
   const backendUrl = (env.WATERMARKS_BACKEND_URL || "").trim();
@@ -102,30 +118,30 @@ export async function onRequest(context) {
     return jsonResponse(503, {
       ok: false,
       error: "backend is not configured",
-    });
+    }, requestIdValue);
   }
 
   let target;
   try {
     target = backendTarget(backendUrl, path, new URL(request.url).search);
   } catch (error) {
-    return jsonResponse(500, { ok: false, error: error.message });
+    return jsonResponse(500, { ok: false, error: error.message }, requestIdValue);
   }
 
   try {
     const upstream = await fetch(target, {
       method,
-      headers: forwardedHeaders(request, env),
+      headers: forwardedHeaders(request, env, requestIdValue),
       body: method === "GET" || method === "HEAD" ? undefined : request.body,
     });
 
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: responseHeaders(upstream),
+      headers: responseHeaders(upstream, requestIdValue),
     });
   } catch (error) {
     console.error("Cloudflare Pages backend proxy failed", error);
-    return jsonResponse(502, { ok: false, error: "backend unavailable" });
+    return jsonResponse(502, { ok: false, error: "backend unavailable" }, requestIdValue);
   }
 }

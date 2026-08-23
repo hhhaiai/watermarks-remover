@@ -7,19 +7,21 @@ Supported formats: PNG, JPEG, WebP, AVIF/HEIC (ISOBMFF), BMP, GIF, and TIFF
 from __future__ import annotations
 
 import base64
+import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import struct
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from common import (
     c2patool_probe_note,
@@ -38,6 +40,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # image free of the non-commercial upstream code. Read per call so tests can
 # set the env vars after import.
 DEFAULT_SYNTHID_SCORER_TIMEOUT = 60.0
+DEFAULT_SYNTHID_SCORER_MAX_RESPONSE_BYTES = 1 << 20
+DEFAULT_SYNTHID_SCORER_ALLOWED_HOSTS = frozenset(
+    {"localhost", "127.0.0.1", "::1", "wr-synthid-score"}
+)
 
 # CtrlRegen is torch-based and needs far more address space than the stdlib
 # parsers. The invoking clean_image.py subprocess applies these higher,
@@ -1316,6 +1322,51 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
     return bytes(out), actions
 
 
+def _c2pa_json_summary(payload: Any) -> dict[str, Any] | None:
+    """Keep useful C2PA structure without copying an unbounded tool dump."""
+    if not isinstance(payload, dict):
+        return None
+    manifests = payload.get("manifests")
+    if not isinstance(manifests, dict):
+        manifests = {}
+    summary: dict[str, Any] = {
+        "active_manifest": payload.get("active_manifest"),
+        "manifest_ids": list(manifests)[:64],
+    }
+    normalized: list[dict[str, Any]] = []
+    for manifest_id, manifest in list(manifests.items())[:64]:
+        if not isinstance(manifest, dict):
+            continue
+        item: dict[str, Any] = {"manifest_id": str(manifest_id)}
+        for key in (
+            "claim_generator",
+            "signature",
+            "signature_status",
+            "validation_status",
+            "hard_binding_status",
+            "soft_binding_status",
+        ):
+            if key in manifest and isinstance(manifest[key], (str, int, float, bool)):
+                item[key] = manifest[key]
+        assertions = manifest.get("assertions")
+        if isinstance(assertions, list):
+            labels: list[str] = []
+            for assertion in assertions[:128]:
+                if isinstance(assertion, dict) and isinstance(assertion.get("label"), str):
+                    labels.append(assertion["label"])
+                elif isinstance(assertion, str):
+                    labels.append(assertion)
+            item["assertion_labels"] = labels
+        normalized.append(item)
+    if normalized:
+        summary["manifests"] = normalized
+    # Some c2patool versions put validation information at the top level.
+    for key in ("validation_status", "signature_status", "hard_binding_status"):
+        if key in payload and isinstance(payload[key], (str, int, float, bool)):
+            summary[key] = payload[key]
+    return summary
+
+
 def run_optional_tools(path: Path) -> dict[str, Any]:
     tools: dict[str, Any] = {}
     c2patool = which("c2patool")
@@ -1331,6 +1382,18 @@ def run_optional_tools(path: Path) -> dict[str, Any]:
             )
             out = (r.stdout or "") + (r.stderr or "")
             low = out.lower()
+            json_summary = None
+            # c2patool releases differ between a JSON report and a human
+            # report. Parse JSON when available, but never make a structured
+            # claim from a human-readable marker alone.
+            for candidate in (r.stdout or "", r.stderr or ""):
+                try:
+                    parsed = json.loads(candidate)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                json_summary = _c2pa_json_summary(parsed)
+                if json_summary is not None:
+                    break
             # Negative markers must veto every positive branch, so the
             # positive alternatives are parenthesised: c2patool reports a
             # missing manifest as "Error: No claim found", which contains
@@ -1356,6 +1419,8 @@ def run_optional_tools(path: Path) -> dict[str, Any]:
             }
             if not conclusive:
                 entry["error"] = f"exit {r.returncode}, unrecognized output"
+            if json_summary is not None:
+                entry["json_summary"] = json_summary
             tools["c2patool"] = entry
         except Exception as e:
             tools["c2patool"] = {
@@ -1399,41 +1464,200 @@ def run_optional_tools(path: Path) -> dict[str, Any]:
     return tools
 
 
+def _synthid_allowed_hosts() -> frozenset[str]:
+    """Return the exact scorer host allowlist.
+
+    The scorer URL is operator configuration, not request data, but it still
+    crosses a trust boundary from the core service to another process. Keep
+    the Docker sidecar and loopback defaults usable while requiring an
+    explicit allowlist entry for a public or custom scorer host.
+    """
+    raw = os.environ.get("WATERMARKS_SYNTHID_SCORER_ALLOWED_HOSTS", "")
+    configured = {part.strip().lower().rstrip(".") for part in raw.split(",") if part.strip()}
+    return frozenset(configured or DEFAULT_SYNTHID_SCORER_ALLOWED_HOSTS)
+
+
+def _synthid_resolve_addresses(host: str, port: int) -> tuple[str, ...]:
+    """Resolve *host* once and reject unsafe address classes.
+
+    Private RFC1918 addresses are allowed for the explicitly trusted Docker
+    sidecar hostname. Link-local, unspecified, multicast and reserved ranges
+    are always rejected; this blocks common cloud metadata targets such as
+    169.254.169.254. The returned addresses are then pinned by the HTTP
+    connection below so a second DNS lookup cannot redirect the request.
+    """
+    host_for_ip = host.split("%", 1)[0]
+    raw_addresses: list[str] = []
+    try:
+        raw_addresses.append(str(ipaddress.ip_address(host_for_ip)))
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError(f"cannot resolve scorer host {host}: {exc}") from exc
+        raw_addresses.extend(str(info[4][0]).split("%", 1)[0] for info in infos)
+
+    addresses: list[str] = []
+    for raw in raw_addresses:
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        mapped = getattr(address, "ipv4_mapped", None)
+        if mapped is not None:
+            address = mapped
+        if (
+            address.is_link_local
+            or address.is_unspecified
+            or address.is_multicast
+            or address.is_reserved
+        ):
+            raise ValueError(f"refusing unsafe scorer address for {host}: {address}")
+        canonical = str(address)
+        if canonical not in addresses:
+            addresses.append(canonical)
+
+    if not addresses:
+        raise ValueError(f"scorer host {host} resolved to no usable addresses")
+    return tuple(addresses)
+
+
+def _synthid_http_origin(base_url: str) -> tuple[str, str, int, str, tuple[str, ...]]:
+    """Validate the scorer endpoint and return its pinned connection target."""
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http(s) scorer endpoint: {base_url}")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("scorer endpoint must not contain credentials, query, or fragment")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise ValueError("scorer endpoint has no hostname")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError(f"invalid scorer endpoint port: {exc}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"invalid scorer endpoint port: {port}")
+
+    allowed_hosts = _synthid_allowed_hosts()
+    if host not in allowed_hosts:
+        raise ValueError(
+            f"scorer host {host!r} is not allowlisted; set "
+            "WATERMARKS_SYNTHID_SCORER_ALLOWED_HOSTS to an exact host"
+        )
+
+    addresses = _synthid_resolve_addresses(host, port)
+    # A configured public scorer is allowed only when it resolves globally;
+    # the built-in sidecar/loopback names may resolve to private addresses.
+    internal_name = host in DEFAULT_SYNTHID_SCORER_ALLOWED_HOSTS or host in allowed_hosts
+    if not internal_name:
+        for raw in addresses:
+            address = ipaddress.ip_address(raw)
+            if not address.is_global:
+                raise ValueError(f"refusing non-public scorer address for {host}: {address}")
+
+    path = (parsed.path.rstrip("/") or "") + "/score"
+    return parsed.scheme, host, port, path, addresses
+
+
+def _synthid_http_request(
+    scheme: str,
+    host: str,
+    port: int,
+    path: str,
+    addresses: tuple[str, ...],
+    body: bytes,
+    headers: dict[str, str],
+    timeout: float,
+    max_response_bytes: int,
+) -> dict[str, Any]:
+    """POST to a previously validated IP without redirects or DNS re-resolution."""
+    last_error: OSError | None = None
+    for address in addresses:
+        raw = None
+        conn: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
+        try:
+            raw = socket.create_connection((address, port), timeout=timeout)
+            if scheme == "https":
+                context = ssl.create_default_context()
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                wrapped = context.wrap_socket(raw, server_hostname=host)
+                raw = None
+                conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=context)
+                conn.sock = wrapped
+            else:
+                conn = http.client.HTTPConnection(host, port, timeout=timeout)
+                conn.sock = raw
+                raw = None
+            conn.request("POST", path, body=body, headers={**headers, "Host": host})
+            response = conn.getresponse()
+            if 300 <= response.status < 400:
+                raise OSError("redirects are disabled for the SynthID scorer")
+            if response.status < 200 or response.status >= 300:
+                raise OSError(f"scorer returned HTTP {response.status}")
+            payload_bytes = response.read(max_response_bytes + 1)
+            if len(payload_bytes) > max_response_bytes:
+                raise OSError(f"scorer response exceeds {max_response_bytes} bytes")
+            payload = json.loads(payload_bytes.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise OSError("bad scorer sidecar response")
+            return payload
+        except (OSError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+        finally:
+            if conn is not None:
+                conn.close()
+            if raw is not None:
+                raw.close()
+    raise OSError(last_error or "no validated scorer address available")
+
+
 def _synthid_score_http(
     path: Path, base_url: str, api_key: str, timeout: float
 ) -> dict[str, Any] | None:
-    """Score *path* via the HTTP sidecar (synthid_score_server.py)."""
+    """Score *path* via the HTTP sidecar (synthid_score_server.py).
+
+    The endpoint is exact-host allowlisted, resolved once, IP-pinned for the
+    request, does not follow redirects, and has a bounded JSON response. A
+    misconfigured or unavailable scorer is reported as unavailable rather than
+    being treated as a clean verdict.
+    """
     try:
         data = path.read_bytes()
-    except OSError as e:
-        return {"available": False, "error": f"cannot read {path}: {e}"}
+        scheme, host, port, score_path, addresses = _synthid_http_origin(base_url)
+        max_response = int(
+            os.environ.get(
+                "WATERMARKS_SYNTHID_SCORER_MAX_RESPONSE_BYTES",
+                str(DEFAULT_SYNTHID_SCORER_MAX_RESPONSE_BYTES),
+            )
+        )
+        if max_response <= 0:
+            raise ValueError("WATERMARKS_SYNTHID_SCORER_MAX_RESPONSE_BYTES must be positive")
+    except (OSError, ValueError) as e:
+        return {"available": False, "status": "unavailable", "error": str(e)}
+
     body = json.dumps({"file": base64.b64encode(data).decode("ascii")}).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Connection": "close"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    if urlparse(base_url).scheme not in ("http", "https"):
-        return {"available": False, "error": f"refusing non-http(s) scorer endpoint: {base_url}"}
-    # S310: URL scheme is restricted to http/https just above.
-    req = urllib.request.Request(  # noqa: S310
-        base_url.rstrip("/") + "/score",
-        data=body,
-        headers=headers,
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (
-        urllib.error.HTTPError,
-        urllib.error.URLError,
-        TimeoutError,
-        OSError,
-        json.JSONDecodeError,
-    ) as e:
-        return {"available": False, "error": f"SynthID scorer sidecar unreachable: {e}"}
-    if not isinstance(payload, dict):
-        return {"available": False, "error": "bad scorer sidecar response"}
-    return payload
+        return _synthid_http_request(
+            scheme,
+            host,
+            port,
+            score_path,
+            addresses,
+            body,
+            headers,
+            timeout,
+            max_response,
+        )
+    except (OSError, TimeoutError) as e:
+        return {
+            "available": False,
+            "status": "unavailable",
+            "error": f"SynthID scorer sidecar unreachable: {e}",
+        }
 
 
 def _synthid_python(upstream: Path) -> str:
@@ -1686,6 +1910,8 @@ def run_ctrlregen_clean(
 def inspect_image(
     path: Path,
     synthid_dir: str | None = None,
+    *,
+    run_synthid: bool = True,
 ) -> ImageInspectReport:
     data = path.read_bytes()
     fmt = detect_format(data)
@@ -1733,7 +1959,7 @@ def inspect_image(
         has_ai_metadata=has_ai,
         findings=findings,
         tools=tools,
-        synthid=run_synthid_score(path, synthid_dir),
+        synthid=run_synthid_score(path, synthid_dir) if run_synthid else None,
         notes=notes,
     )
 
@@ -2024,8 +2250,10 @@ def clean_image(
     markdiffusion_steps: int = 50,
     markdiffusion_device: str | None = None,
     markdiffusion_timeout: int = 3600,
+    score_synthid_before: bool = True,
+    score_synthid_after: bool = True,
 ) -> dict[str, Any]:
-    synthid_before = run_synthid_score(path, synthid_dir)
+    synthid_before = run_synthid_score(path, synthid_dir) if score_synthid_before else None
     data = path.read_bytes()
     fmt = detect_format(data)
     if fmt == "png":
@@ -2111,7 +2339,7 @@ def clean_image(
         else:
             raise ValueError(f"unknown pixel remover: {remove_pixel}")
 
-    after = inspect_image(dest, synthid_dir=synthid_dir)
+    after = inspect_image(dest, synthid_dir=synthid_dir, run_synthid=score_synthid_after)
     return {
         "input": str(path),
         "output": str(dest),

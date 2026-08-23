@@ -84,6 +84,24 @@ def test_health(conn):
     assert "version" in body
 
 
+def test_request_id_is_preserved_in_header_and_json(conn):
+    payload = json.dumps({"file": _b64(b"plain"), "name": "note.txt"}).encode("utf-8")
+    conn.request(
+        "POST",
+        "/extract",
+        body=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Request-ID": "client-proof-123",
+        },
+    )
+    response = conn.getresponse()
+    body = json.loads(response.read())
+    assert response.status == 200
+    assert response.getheader("X-Request-ID") == "client-proof-123"
+    assert body["request_id"] == "client-proof-123"
+
+
 def test_capabilities(conn):
     status, body = _get(conn, "/capabilities")
     assert status == 200
@@ -91,6 +109,18 @@ def test_capabilities(conn):
     assert "pixel_backends" in body
     assert "scorers" in body
     assert "harnesses" in body
+    assert body["api_versions"] == ["legacy", "v1"]
+    assert body["evidence_schema"] == {
+        "name": "watermarks-remover.evidence",
+        "version": "1.0.0",
+        "status_values": [
+            "detected",
+            "not_detected",
+            "inconclusive",
+            "unavailable",
+            "error",
+        ],
+    }
 
 
 def test_openapi_spec_covers_all_endpoints(conn):
@@ -281,8 +311,34 @@ def test_openapi_spec_covers_batch_endpoints(conn):
     assert status == 200
     assert "/inspect/batch" in body["paths"]
     assert "post" in body["paths"]["/inspect/batch"]
+    assert "/extract/batch" in body["paths"]
+    assert "post" in body["paths"]["/extract/batch"]
+    assert "/v1/extract" in body["paths"]
+    assert "post" in body["paths"]["/v1/extract"]
+    assert "/v1/extract/batch" in body["paths"]
+    assert "post" in body["paths"]["/v1/extract/batch"]
     assert "/clean/batch" in body["paths"]
     assert "post" in body["paths"]["/clean/batch"]
+
+
+def test_openapi_spec_describes_evidence_schema(conn):
+    status, body = _get(conn, "/openapi.json")
+    assert status == 200
+    schema = body["paths"]["/v1/extract"]["post"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert {
+        "schema",
+        "workflow",
+        "source",
+        "evidence",
+        "evidence_summary",
+        "limitations",
+    }.issubset(schema["properties"])
+    evidence = schema["properties"]["evidence"]["items"]
+    assert "confidence_level" in evidence["properties"]
+    assert "verification" in evidence["properties"]
+    assert "locator" in evidence["properties"]
 
 
 def test_inspect_batch_mixed_results(conn):

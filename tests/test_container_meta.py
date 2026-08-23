@@ -498,6 +498,69 @@ def test_docx_layer_a_via_clean_container(tmp_path: Path):
         assert " FIELD \u200b KEEP " in doc
 
 
+def _make_ooxml_with_invisible_text(fmt: str, body_text: str) -> bytes:
+    buf = io.BytesIO()
+    if fmt == "docx":
+        parts = {
+            "word/document.xml": (
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                f"<w:body><w:p><w:r><w:t>{body_text}</w:t></w:r></w:p></w:body>"
+                "</w:document>"
+            )
+        }
+    elif fmt == "xlsx":
+        parts = {
+            "xl/workbook.xml": (
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+            ),
+            "xl/sharedStrings.xml": (
+                '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                f"<si><t>{body_text}</t></si></sst>"
+            ),
+        }
+    elif fmt == "pptx":
+        parts = {
+            "ppt/presentation.xml": (
+                '<p:presentation xmlns:p="http://schemas.openxmlformats.org/'
+                'presentationml/2006/main"/>'
+            ),
+            "ppt/slides/slide1.xml": (
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                f"<a:t>{body_text}</a:t></p:sld>"
+            ),
+        }
+    else:  # pragma: no cover - test helper contract
+        raise AssertionError(fmt)
+
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        for name, payload in parts.items():
+            zf.writestr(name, payload)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("fmt", ["docx", "xlsx", "pptx"])
+def test_ooxml_inspect_extracts_part_local_layer_a_evidence(tmp_path: Path, fmt: str):
+    src = tmp_path / f"before.{fmt}"
+    src.write_bytes(_make_ooxml_with_invisible_text(fmt, "A&#x200B;B\u2060C"))
+
+    report = inspect_container(src)
+    assert report.layer_a_total == 2
+    assert {hit["codepoint"] for hit in report.layer_a_hits} == {"U+200B", "U+2060"}
+    entity_hit = next(hit for hit in report.layer_a_hits if hit["codepoint"] == "U+200B")
+    expected_prefix = {"docx": "word/", "xlsx": "xl/", "pptx": "ppt/"}[fmt]
+    assert entity_hit["part"].startswith(expected_prefix)
+    assert entity_hit["samples"][0]["source_fragment"] == "&#x200B;"
+    assert entity_hit["samples"][0]["part_utf8_byte_offset"] >= 0
+    assert report.details["layer_a_scan"]["scope"] == "visible_text_runs"
+    assert report.details["layer_a_scan"]["truncated"] is False
+
+    dest = tmp_path / f"after.{fmt}"
+    clean_container(src, dest)
+    assert inspect_container(dest).layer_a_total == 0
+
+
 def _make_odt_with_invisible_text() -> bytes:
     buf = io.BytesIO()
     content = (
@@ -524,6 +587,36 @@ def test_odt_layer_a_strips_invisible_text():
         assert "\u200b" not in content
         assert "\u2060" not in content
         assert "<text:span>world</text:span>" in content
+
+
+def test_odt_inspect_reports_visible_text_and_clean_parity(tmp_path: Path):
+    src = tmp_path / "before.odt"
+    src.write_bytes(_make_odt_with_invisible_text())
+    report = inspect_container(src)
+    assert report.layer_a_total == 2
+    assert {hit["codepoint"] for hit in report.layer_a_hits} == {"U+200B", "U+2060"}
+    assert {hit["part"] for hit in report.layer_a_hits} == {"content.xml"}
+
+    dest = tmp_path / "after.odt"
+    clean_container(src, dest)
+    assert inspect_container(dest).layer_a_total == 0
+
+
+def test_odt_visible_vendor_name_is_not_metadata():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        zf.writestr(
+            "content.xml",
+            '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:'
+            'xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+            "<text:p>Claude is discussed as ordinary prose.</text:p>"
+            "</office:document-content>",
+        )
+        zf.writestr("meta.xml", "<office:document-meta/>")
+    _has_c2pa, has_ai, findings, _details = inspect_odt(buf.getvalue())
+    assert not has_ai
+    assert not any("Claude" in finding for finding in findings)
 
 
 def _make_odt(generator: str = "Anthropic Claude") -> bytes:

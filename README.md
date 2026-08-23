@@ -169,6 +169,10 @@ The same machinery runs as a stdlib HTTP service (`service/scripts/server.py`) �
 | GET | `/openapi.json` | — | dynamically generated OpenAPI 3.0.3 spec |
 | POST | `/inspect` | `{"file": "<base64>", "name": "notes.md"}` | `{"ok", "kind", "suspicious", "report"}` |
 | POST | `/detect` | `{"file": "<base64>", "name": "notes.txt"}` | `{"ok", "kind", "detections": [...]}` |
+| POST | `/extract` | `{"file": "<base64>", "name": "notes.txt", "mime": "text/plain"}` | normalized evidence, source SHA-256, coverage, verdict |
+| POST | `/extract/batch` | `{"files": [{"file": "<base64>", "name": "notes.txt"}, ...]}` | per-file normalized evidence and request IDs |
+| POST | `/v1/extract` | same as `/extract` | versioned Evidence Schema v1; legacy route remains compatible |
+| POST | `/v1/extract/batch` | same as `/extract/batch` | versioned batch Evidence Schema v1 |
 | POST | `/clean` | `{"file": "<base64>", "name": "notes.md", "options": {...}}` | `{"ok", "kind", "cleaned": "<base64>", "report"}` |
 | POST | `/inspect/batch` | `{"files": [{"file": "<base64>", "name": "notes.md"}, ...]}` | `{"ok", "results": [{"name", "ok", "kind", "suspicious", "report"}, ...]}` |
 | POST | `/clean/batch` | `{"files": [{"file": "<base64>", "name": "notes.md", "options": {...}}, ...]}` | `{"ok", "results": [{"name", "ok", "kind", "cleaned": "<base64>", "report"}, ...]}` |
@@ -200,18 +204,69 @@ not configured. Full text inspection/cleaning, plus image, video, Office,
 PDF, and other file processing, uses the Python service and therefore needs
 the backend variables.
 
-The deployment-specific steps, including the custom domain
-[`remove-watermark.page.dev`](https://remove-watermark.page.dev), are in
+The deployment-specific steps, including the current production URL
+[`remove-watermark-ddj.pages.dev`](https://remove-watermark-ddj.pages.dev), are in
 [`docs/cloudflare-pages.md`](docs/cloudflare-pages.md).
 
 The `cf` branch is kept deployable from the repository root: it contains the
 same `main` service code plus the Pages static output, same-origin API proxy,
 headers, and Wrangler configuration. The Pages client exposes every service
 route (`/health`, `/capabilities`, `/openapi.json`, `/inspect`, `/detect`,
-`/clean`, and the three batch routes) through `/api/*`; it does not reimplement
+`/extract`, `/clean`, and all batch routes) through `/api/*`; it does not reimplement
 the Python cleaning pipeline in JavaScript. Because file requests are JSON with
 base64-encoded bytes, the browser caps individual uploads at 70 MiB so they
 remain below the default Cloudflare Pages/Workers request envelope limit.
+
+### Evidence extraction (`/extract`)
+
+`POST /extract` is the evidence-first read-only surface. It computes the source
+SHA-256, reports both the declared and byte-detected media type, classifies by
+bytes plus filename, and returns a normalized report with `detected`,
+`not_detected`, `inconclusive`, `unavailable`, or `error` states.
+Unicode carriers include occurrence-level codepoints, UTF-8 bytes, character and
+byte offsets, bounded context, and explicitly labelled candidate binary mappings;
+the candidate decoder never claims a payload without a framing/checksum match.
+`POST /v1/extract` and `/v1/extract/batch` are the stable versioned aliases.
+Both the legacy and v1 paths return `watermarks-remover.evidence` schema `1.0.0`.
+Each evidence item is bound to the source SHA-256 and includes a deterministic
+`evidence_id`, carrier, locator, `confidence_level`, and verification status.
+Extractor-specific `confidence` values remain present and keep their original
+type for backward compatibility.
+PDF inspection also scans recognizable raw image signatures inside stream payloads,
+including bounded Flate-decoded streams, and reports them as
+`report.details.embedded_images` candidates. This is not a PDF renderer:
+JPEG2000, CCITT and producer-specific encodings remain an explicit limitation.
+Direct `/EmbeddedFile` streams are reported separately under
+`report.details.embedded_files`; raw and Flate-decoded attachments are classified
+and bounded-recursively inspected as images, UTF-8 text, or recognized Office/ODT/
+EPUB/SVG containers. Object streams, encryption, non-Flate filter chains, nested
+PDF recursion, and complete Filespec filename mapping remain explicit limitations.
+DOCX, XLSX, PPTX, and ODT visible text nodes are scanned with the same Layer A
+rules used during cleaning. Evidence includes the package part, XML character and
+UTF-8 byte offsets, the original literal/entity, and bounded context.
+Metadata and statistical detector results remain evidence rather than a claim
+that an unknown vendor watermark has been removed. The endpoint never mutates
+the input and does not persist an evidence archive by itself.
+
+`/extract` coverage counts completed extractor layers, so an unavailable SynthID,
+vendor detector, or PDF C2PA validator reduces coverage and produces an explicit
+limitation instead of being displayed as a clean result. When c2patool emits a
+structured report, a bounded normalized manifest summary is included; the full
+original bytes are never copied into the JSON response.
+
+Every `/clean` response now contains `report.validation`, including input/output
+SHA-256 values, byte counts, and a post-clean format invariant. The HTTP response
+is not marked successful when the cleaner returns empty bytes or changes the
+detected format. When available, qpdf compares PDF parser acceptance before/after
+and ffprobe compares audio/video parser acceptance and stream count. A validator
+that rejects both the fixture input and output remains `inconclusive`; only an
+accepted input followed by a rejected/structurally changed output breaks the gate.
+This is not a substitute for a full PDF render or complete audio/video decode.
+
+Every HTTP response includes a bounded `request_id` field and `X-Request-ID`
+header. A safe caller-supplied `X-Request-ID` is preserved; otherwise the service
+generates one. `/extract/batch` derives deterministic per-item IDs from the parent
+request so logs and evidence can be correlated without storing the original file.
 
 ### Watermark detection (`/detect` and `detect_before` / `detect_after`)
 
@@ -238,7 +293,11 @@ Image scoring: when `WATERMARKS_SYNTHID_SCORER_URL` is set, the service
 scores images through the `wr-synthid-score` sidecar (heavy profile); with a
 local `REVERSE_SYNTHID_DIR` it uses the checkout directly. Detection is
 fail-soft: unconfigured, timed-out, or errored detectors report
-`{"available": false, "error": ...}` and never block cleaning.
+`{"available": false, "status": "unavailable|error", "error": ...}` and never
+block cleaning. The HTTP sidecar is exact-host allowlisted, resolved once,
+connected to the validated IP, does not follow redirects, and has a bounded
+response body; configure `WATERMARKS_SYNTHID_SCORER_ALLOWED_HOSTS` for a
+custom/public scorer.
 
 ## Docker / compose
 
@@ -310,6 +369,8 @@ set -a; . ./.env; set +a; python3 service/scripts/rewrite_text.py /tmp/x.txt -o 
 | `WATERMARKS_GEMINI_*` | — | Removed Aug 2026: Google retired SynthID text watermarking on the API (see `vendor-notes.md`) |
 | `WATERMARKS_SYNTHID_SCORER_URL` | `wr-core` | Point core at the `wr-synthid-score` sidecar for SynthID image scoring (e.g. `http://wr-synthid-score:8766` under the heavy profile) |
 | `WATERMARKS_SYNTHID_SCORER_API_KEY` | `wr-core` + `wr-synthid-score` | Shared bearer key for the scorer sidecar (empty = no auth) |
+| `WATERMARKS_SYNTHID_SCORER_ALLOWED_HOSTS` | `wr-core` | Exact comma-separated scorer host allowlist; defaults to loopback and `wr-synthid-score`, custom/public hosts must be explicit |
+| `WATERMARKS_SYNTHID_SCORER_MAX_RESPONSE_BYTES` | `wr-core` | Maximum scorer JSON response; default `1048576` |
 | `WATERMARKS_MARKLLM_SCHEME` | `text_detectors.py` (host) | MarkLLM scheme for `/detect`: `kgw` (default) / `synthid` |
 | `HF_TOKEN` | harness/heavy services | Hugging Face token for gated models |
 | `WATERMARKS_SERVICE_URL` | client only (skill / curl) | Where to reach the service; default `http://127.0.0.1:8765` |
@@ -844,10 +905,10 @@ Layer B makes sense when you specifically want the premium model's **thinking an
 | GIF | Comment / XMP application extensions | Drop comment & XMP, keep `NETSCAPE2.0` loop |
 | TIFF (classic + BigTIFF) | IFD tags: XMP, EXIF, GPS, IPTC, MakerNote | Drop tags, zero payloads, keep strips |
 | SVG | `<metadata>`, XMP | Strip blocks |
-| PDF | Byte/XMP + optional tools | **exiftool** then **qpdf**; degraded without either |
-| DOCX | docProps / customXml | Scrub props, drop customXml |
+| PDF | Byte/XMP, raw/Flate images, direct attachments + optional tools | **exiftool** then **qpdf**; degraded without either |
+| DOCX / XLSX / PPTX | docProps / customXml, embedded media, visible-text Layer A | Scrub props, drop customXml, clean media + text runs |
 | EPUB | OPF metadata, XHTML meta/JSON-LD, embedded media | Scrub OPF, strip XHTML meta, clean media + Layer A (skips encrypted parts) |
-| ODT | meta.xml | Drop generator / AI-ish meta |
+| ODT | meta.xml + visible-text Layer A | Drop generator / AI-ish meta + clean body text |
 | HTML | meta, JSON-LD, data-ai* | Strip tags/attrs |
 | Markdown | YAML frontmatter AI keys | Drop keys + Layer A body |
 | MP4 / MOV / M4A / M4V | ISOBMFF `jumb`/`uuid` boxes (same mechanism as AVIF/HEIC) + `moov/udta` generator tags | Drop boxes |

@@ -634,6 +634,81 @@ def inspect_text(
     return TextInspectReport(length=len(text), suspicious_total=total, hits=hits, notes=notes)
 
 
+def extract_unicode_evidence(text: str, *, aggressive: bool = False) -> dict:
+    """Return occurrence-level evidence for Layer A carriers.
+
+    ``inspect_text`` intentionally aggregates hits for a compact human report.
+    Extraction needs the lossless view as well: codepoint, UTF-8 bytes,
+    character/byte offsets, and a bounded context window. Binary decodings are
+    labelled as candidates only; the presence of two zero-width symbols is not
+    proof that a payload exists.
+    """
+    report = inspect_text(text, aggressive=aggressive)
+
+    def escaped(value: str) -> str:
+        # JSON responses use ensure_ascii=False for normal text. Context can
+        # contain surrogateescaped bytes, so emit a reversible ASCII escape
+        # representation instead of allowing UTF-8 serialization to fail.
+        return value.encode("unicode_escape", errors="backslashreplace").decode("ascii")
+
+    kinds = {(hit.codepoint, hit.kind) for hit in report.hits}
+    occurrences: list[dict] = []
+    sequence: list[str] = []
+    for char_offset, character in enumerate(text):
+        key = (ord(character), next((kind for cp, kind in kinds if cp == ord(character)), None))
+        if key[1] is None or key not in kinds:
+            continue
+        byte_offset = len(text[:char_offset].encode("utf-8", errors="surrogateescape"))
+        raw = character.encode("utf-8", errors="surrogateescape")
+        sequence.append(f"U+{ord(character):04X}")
+        occurrences.append(
+            {
+                "codepoint": f"U+{ord(character):04X}",
+                "name": unicodedata.name(character, "UNKNOWN"),
+                "kind": key[1],
+                "character_offset": char_offset,
+                "byte_offset": byte_offset,
+                "utf8_hex": raw.hex(),
+                "context_before": escaped(text[max(0, char_offset - 16) : char_offset]),
+                "context_after": escaped(text[char_offset + 1 : char_offset + 17]),
+            }
+        )
+
+    candidate_symbols = [
+        cp for cp in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF) if f"U+{cp:04X}" in sequence
+    ]
+    candidates: list[dict] = []
+    if (
+        len(candidate_symbols) == 2
+        and len(sequence) >= 8
+        and set(sequence) == {f"U+{candidate_symbols[0]:04X}", f"U+{candidate_symbols[1]:04X}"}
+    ):
+        for zero, one in (candidate_symbols, candidate_symbols[::-1]):
+            bits = "".join(
+                "0" if codepoint == f"U+{zero:04X}" else "1"
+                for codepoint in sequence
+                if codepoint in {f"U+{zero:04X}", f"U+{one:04X}"}
+            )
+            candidates.append(
+                {
+                    "status": "candidate_only",
+                    "payload_extracted": False,
+                    "mapping": {f"U+{zero:04X}": "0", f"U+{one:04X}": "1"},
+                    "bits": bits,
+                    "confidence": round(min(0.8, 0.2 + min(len(bits), 128) / 256), 3),
+                    "note": "A binary mapping is a hypothesis; no payload is asserted without a framing/checksum match.",
+                }
+            )
+
+    return {
+        "carrier_family": "unicode_format_controls",
+        "occurrences": occurrences,
+        "sequence": sequence,
+        "candidate_decodings": candidates,
+        "payload_extracted": False,
+    }
+
+
 def clean_text(
     text: str,
     *,
