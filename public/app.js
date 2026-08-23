@@ -2,7 +2,11 @@
   "use strict";
 
   const MAX_TEXT_CHARACTERS = 20000;
-  const MAX_BROWSER_FILE_BYTES = 200 * 1024 * 1024;
+  // Pages Functions have a request-body ceiling. The JSON/base64 envelope
+  // expands the original file by roughly 4/3, so keep the browser-side cap
+  // below the default 100 MiB Cloudflare request limit instead of allowing a
+  // file that will fail only after upload starts.
+  const MAX_BROWSER_FILE_BYTES = 75 * 1024 * 1024;
   const API_BASE = (window.WATERMARKS_API_BASE || "/api").replace(/\/+$/, "");
   const I18N = window.REMOVE_WATERMARK_I18N || {};
   const SUPPORTED_LOCALES = Object.keys(I18N);
@@ -244,7 +248,10 @@
       body = {};
     }
     if (!response.ok || body.ok === false) {
-      const error = new Error(body.error || t("http_error", { status: response.status }));
+      const message = response.status === 413
+        ? t("cloudflare_payload_error")
+        : (body.error || t("http_error", { status: response.status }));
+      const error = new Error(message);
       error.status = response.status;
       throw error;
     }

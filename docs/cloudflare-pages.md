@@ -19,6 +19,34 @@ The proxy only exposes the service routes already supported by this project.
 If `WATERMARKS_BACKEND_API_KEY` is configured, it is injected at the Pages
 Function boundary and is never sent to browser JavaScript.
 
+## Main → cf parity policy
+
+`cf` is not a fork of the cleaning engine. Before a Pages deployment, update
+`main`, fast-forward `cf` to that commit, and keep the Cloudflare-only files
+beside the unchanged `service/` tree. The Pages Function is deliberately a
+same-origin transport layer; the Python service remains the single source of
+truth for classification, inspection, detection, cleaning, options, limits,
+and optional backends.
+
+The proxy route allow-list must stay in parity with `service/scripts/server.py`:
+
+| Service route | Pages route | Method |
+| --- | --- | --- |
+| `/health` | `/api/health` | GET |
+| `/capabilities` | `/api/capabilities` | GET |
+| `/openapi.json` | `/api/openapi.json` | GET |
+| `/inspect` | `/api/inspect` | POST |
+| `/detect` | `/api/detect` | POST |
+| `/clean` | `/api/clean` | POST |
+| `/inspect/batch` | `/api/inspect/batch` | POST |
+| `/detect/batch` | `/api/detect/batch` | POST |
+| `/clean/batch` | `/api/clean/batch` | POST |
+
+Do not add a second cleaning implementation to `public/app.js`: the client
+only encodes the file, forwards the request, and renders the returned report
+and cleaned bytes. This preserves new `main` formats and options when the
+Python service is updated.
+
 ## 1. Run the backend
 
 Run the core container on a host reachable from Cloudflare. The backend URL
@@ -116,9 +144,11 @@ rather than contacting the backend directly.
 
 - Pages does not replace the Python backend. Keep the backend container behind
   HTTPS and configure the shared bearer key in both locations.
-- The browser UI caps a single file at 200 MiB. The backend's default decoded
-  input cap is 256 MiB; Cloudflare request-size limits can be lower depending
-  on the plan, so use smaller files for the public site when needed.
+- The browser UI caps a single file at 75 MiB. Requests are JSON envelopes with
+  base64-encoded bytes, so this leaves room below the default 100 MiB
+  Cloudflare Pages/Workers request limit. The backend's decoded input cap is
+  larger, but the Pages edge limit applies first. Larger uploads require a
+  direct-upload/R2 design rather than increasing this client-side constant.
 - When the backend is not configured, the text tab still has a clearly labeled
   browser-local fallback for `U+00AD`, `U+200B`, and `U+FEFF`. This is not a
   replacement for the Python service's full text rules; image, video, Office,

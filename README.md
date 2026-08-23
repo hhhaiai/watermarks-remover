@@ -204,6 +204,15 @@ The deployment-specific steps, including the custom domain
 [`remove-watermark.page.dev`](https://remove-watermark.page.dev), are in
 [`docs/cloudflare-pages.md`](docs/cloudflare-pages.md).
 
+The `cf` branch is kept deployable from the repository root: it contains the
+same `main` service code plus the Pages static output, same-origin API proxy,
+headers, and Wrangler configuration. The Pages client exposes every service
+route (`/health`, `/capabilities`, `/openapi.json`, `/inspect`, `/detect`,
+`/clean`, and the three batch routes) through `/api/*`; it does not reimplement
+the Python cleaning pipeline in JavaScript. Because file requests are JSON with
+base64-encoded bytes, the browser caps individual uploads at 75 MiB so they
+remain below the default Cloudflare Pages/Workers request envelope limit.
+
 ### Watermark detection (`/detect` and `detect_before` / `detect_after`)
 
 Detection is a separate step from cleaning — the service never calls vendor
