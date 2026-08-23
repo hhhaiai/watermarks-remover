@@ -26,6 +26,7 @@
     theme: "dark",
     serviceState: "checking",
     outputModel: null,
+    capabilities: null,
   };
 
   try {
@@ -268,7 +269,12 @@
   }
 
   function cleanOptions() {
-    return textNfkc.checked ? { nfkc: true } : {};
+    const options = textNfkc.checked ? { nfkc: true } : {};
+    // Run every detector configured by the Python service around a clean.
+    // The backend fail-softs unavailable detectors and reports their status.
+    options.detect_before = true;
+    options.detect_after = true;
+    return options;
   }
 
   function localTextReport(value) {
@@ -375,6 +381,21 @@
       }
     }
 
+    if (report && report.text_detectors && !Array.isArray(report.text_detectors)) {
+      for (const [phase, items] of Object.entries(report.text_detectors)) {
+        if (!Array.isArray(items)) continue;
+        const label = phase === "before" ? t("detector_before") : phase === "after" ? t("detector_after") : phase;
+        lines.push(label + ":");
+        lines.push(...detectionLines({ detections: items }).map((line) => "  " + line));
+      }
+    }
+
+    for (const [phase, label] of [["synthid_before", t("detector_before")], ["synthid_after", t("detector_after")]]) {
+      const score = report && report[phase];
+      if (!score || typeof score !== "object") continue;
+      lines.push(...detectionLines({ detections: [{ detector: "synthid " + label, ...score }] }));
+    }
+
     lines.push(...detectionLines(detection));
 
     if (!lines.length) {
@@ -389,6 +410,16 @@
       && Array.isArray(detection.detections)
       && detection.detections.some((item) => item && item.is_watermarked === true),
     );
+    const reportDetectorHasFinding = Boolean(
+      report
+      && report.text_detectors
+      && !Array.isArray(report.text_detectors)
+      && Object.values(report.text_detectors).some((items) => (
+        Array.isArray(items) && items.some((item) => item && item.is_watermarked === true)
+      )),
+    );
+    const synthidHasFinding = [report && report.synthid_before, report && report.synthid_after]
+      .some((item) => item && item.is_watermarked === true);
     return Boolean(
       report && (
         (Array.isArray(report.hits) && report.hits.length)
@@ -396,7 +427,7 @@
         || report.suspicious_total
         || report.has_c2pa
         || report.has_ai_metadata
-      ) || detectionHasFinding,
+      ) || detectionHasFinding || reportDetectorHasFinding || synthidHasFinding,
     );
   }
 
@@ -523,8 +554,8 @@
     fileResult.hidden = false;
   }
 
-  function renderTextResult(report, cleaned, local, file, base64, filename) {
-    showAnalysis(report, local);
+  function renderTextResult(report, cleaned, local, file, base64, filename, detection) {
+    showAnalysis(report, local, detection);
     state.outputModel.correctedKey = null;
     correctedOutput.textContent = cleaned;
     copyButton.hidden = false;
@@ -552,8 +583,8 @@
     fileResult.hidden = true;
   }
 
-  function renderBinaryResult(report, result, file, local) {
-    showAnalysis(report, local);
+  function renderBinaryResult(report, result, file, local, detection) {
+    showAnalysis(report, local, detection);
     state.outputModel.correctedKey = "binary_corrected";
     correctedOutput.textContent = t(state.outputModel.correctedKey);
     copyButton.hidden = true;
@@ -566,6 +597,17 @@
       : {};
     if (payload && payload.kind && !report.kind) report.kind = payload.kind;
     return report;
+  }
+
+  function mergeCleanReport(report, cleanReport) {
+    if (!cleanReport || typeof cleanReport !== "object") return report;
+    const merged = { ...report };
+    for (const key of ["stats", "text_detectors", "synthid_before", "synthid_after"]) {
+      if (Object.prototype.hasOwnProperty.call(cleanReport, key)) {
+        merged[key] = cleanReport[key];
+      }
+    }
+    return merged;
   }
 
   function cleanedName(filename) {
@@ -608,10 +650,18 @@
     }
 
     const payload = textPayload(value);
-    const inspected = await request("/inspect", payload);
+    const { inspected, detection } = await inspectWithDetection(payload);
     const result = await request("/clean", payload);
     const removed = result.report && result.report.stats ? result.report.stats.removed_count : null;
-    renderTextResult(reportWithKind(inspected), base64ToText(result.cleaned), false);
+    renderTextResult(
+      mergeCleanReport(reportWithKind(inspected), result.report),
+      base64ToText(result.cleaned),
+      false,
+      null,
+      null,
+      null,
+      detection,
+    );
     submitHint.textContent = typeof removed === "number"
       ? t("hint_clean_removed", { count: removed })
       : t("hint_clean_done");
@@ -666,22 +716,23 @@
     }
 
     const input = await encodedFile(file);
-    const inspected = await request("/inspect", input);
+    const { inspected, detection } = await inspectWithDetection(input);
     input.options = cleanOptions();
     const result = await request("/clean", input);
     const filename = cleanedName(file.name);
 
     if (result.kind === "text" || isTextFile(file)) {
       renderTextResult(
-        reportWithKind(inspected),
+        mergeCleanReport(reportWithKind(inspected), result.report),
         base64ToText(result.cleaned),
         false,
         file,
         result.cleaned,
         filename,
+        detection,
       );
     } else {
-      renderBinaryResult(reportWithKind(inspected), result, file, false);
+      renderBinaryResult(mergeCleanReport(reportWithKind(inspected), result.report), result, file, false, detection);
     }
     submitHint.textContent = t("hint_file_done");
   }
@@ -833,6 +884,11 @@
   async function checkService() {
     try {
       await request("/health");
+      try {
+        state.capabilities = await request("/capabilities");
+      } catch {
+        state.capabilities = null;
+      }
       state.backendAvailable = true;
       setServiceStatus("ready");
       submitHint.textContent = t("hint_ready", { max: MAX_TEXT_CHARACTERS.toLocaleString() });

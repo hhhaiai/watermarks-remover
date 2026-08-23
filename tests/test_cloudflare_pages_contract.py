@@ -51,6 +51,14 @@ def test_pages_client_uses_cloudflare_safe_upload_cap() -> None:
     assert "cloudflare_payload_error" in APP
 
 
+def test_pages_client_runs_all_configured_detectors_for_scan_and_clean() -> None:
+    assert 'request("/capabilities")' in APP
+    assert 'request("/detect"' in APP
+    assert "options.detect_before = true;" in APP
+    assert "options.detect_after = true;" in APP
+    assert "mergeCleanReport" in APP
+
+
 def test_pages_function_keeps_backend_credentials_server_side() -> None:
     assert "WATERMARKS_BACKEND_API_KEY" in FUNCTION
     assert "Authorization" in FUNCTION
