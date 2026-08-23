@@ -383,7 +383,7 @@
 
     if (report && report.text_detectors && !Array.isArray(report.text_detectors)) {
       for (const [phase, items] of Object.entries(report.text_detectors)) {
-        if (!Array.isArray(items)) continue;
+        if (!Array.isArray(items) || !items.length) continue;
         const label = phase === "before" ? t("detector_before") : phase === "after" ? t("detector_after") : phase;
         lines.push(label + ":");
         lines.push(...detectionLines({ detections: items }).map((line) => "  " + line));
