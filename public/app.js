@@ -6,7 +6,7 @@
   // expands the original file by roughly 4/3, so keep the browser-side cap
   // below the default 100 MiB Cloudflare request limit instead of allowing a
   // file that will fail only after upload starts.
-  const MAX_BROWSER_FILE_BYTES = 75 * 1024 * 1024;
+  const MAX_BROWSER_FILE_BYTES = 70 * 1024 * 1024;
   const API_BASE = (window.WATERMARKS_API_BASE || "/api").replace(/\/+$/, "");
   const I18N = window.REMOVE_WATERMARK_I18N || {};
   const SUPPORTED_LOCALES = Object.keys(I18N);

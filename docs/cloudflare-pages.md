@@ -144,7 +144,7 @@ rather than contacting the backend directly.
 
 - Pages does not replace the Python backend. Keep the backend container behind
   HTTPS and configure the shared bearer key in both locations.
-- The browser UI caps a single file at 75 MiB. Requests are JSON envelopes with
+- The browser UI caps a single file at 70 MiB. Requests are JSON envelopes with
   base64-encoded bytes, so this leaves room below the default 100 MiB
   Cloudflare Pages/Workers request limit. The backend's decoded input cap is
   larger, but the Pages edge limit applies first. Larger uploads require a

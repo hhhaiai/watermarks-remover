@@ -210,7 +210,7 @@ headers, and Wrangler configuration. The Pages client exposes every service
 route (`/health`, `/capabilities`, `/openapi.json`, `/inspect`, `/detect`,
 `/clean`, and the three batch routes) through `/api/*`; it does not reimplement
 the Python cleaning pipeline in JavaScript. Because file requests are JSON with
-base64-encoded bytes, the browser caps individual uploads at 75 MiB so they
+base64-encoded bytes, the browser caps individual uploads at 70 MiB so they
 remain below the default Cloudflare Pages/Workers request envelope limit.
 
 ### Watermark detection (`/detect` and `detect_before` / `detect_after`)

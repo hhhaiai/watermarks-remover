@@ -47,7 +47,7 @@ def test_pages_preview_csp_allows_in_memory_media() -> None:
 
 
 def test_pages_client_uses_cloudflare_safe_upload_cap() -> None:
-    assert "const MAX_BROWSER_FILE_BYTES = 75 * 1024 * 1024;" in APP
+    assert "const MAX_BROWSER_FILE_BYTES = 70 * 1024 * 1024;" in APP
     assert "cloudflare_payload_error" in APP
 
 
