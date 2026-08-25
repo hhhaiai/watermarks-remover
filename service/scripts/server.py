@@ -65,10 +65,16 @@ from common import (
     eprint,
     looks_binary,
     safe_arg,
+    subprocess_creationflags,
     subprocess_preexec_fn,
     which,
 )
-from container_meta import clean_container, detect_container_format, inspect_container
+from container_meta import (
+    DEEP_IMAGE_MODES,
+    clean_container,
+    detect_container_format,
+    inspect_container,
+)
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score
 from image_meta import detect_format as detect_image_format
@@ -114,7 +120,35 @@ ALLOWED_CLEAN_OPTIONS = {
     "strip_all_metadata": bool,
     "detect_before": bool,
     "detect_after": bool,
+    "deep_images": str,
 }
+
+
+@cache
+def _ghostscript_usable() -> bool:
+    """True when a Ghostscript binary is present and runnable.
+
+    Cached and guarded like _tool_usable: /capabilities is polled, and probing
+    spawns a process every time otherwise.
+    """
+    from container_meta import which_ghostscript
+
+    gs = which_ghostscript()
+    if not gs:
+        return False
+    try:
+        r = subprocess.run(
+            [gs, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            preexec_fn=subprocess_preexec_fn,
+            creationflags=subprocess_creationflags,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def _json_ok(payload: dict[str, Any]) -> bytes:
@@ -149,6 +183,7 @@ def _tool_usable(cmd: str) -> bool:
             timeout=10,
             preexec_fn=subprocess_preexec_fn,
             check=False,
+            creationflags=subprocess_creationflags,
         )
     except Exception:
         return False
@@ -168,6 +203,7 @@ def capabilities() -> dict[str, Any]:
             "c2patool": _tool_usable("c2patool"),
             "exiftool": _tool_usable("exiftool"),
             "qpdf": _tool_usable("qpdf"),
+            "ghostscript": _ghostscript_usable(),
         },
         "pixel_backends": {
             "ctrlregen": bool(os.environ.get("NOAI_WATERMARK_DIR")),
@@ -407,7 +443,8 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                         "tools": _schema(
                             type="object",
                             properties={
-                                k: _schema(type="boolean") for k in ("c2patool", "exiftool", "qpdf")
+                                k: _schema(type="boolean")
+                                for k in ("c2patool", "exiftool", "qpdf", "ghostscript")
                             },
                         ),
                         "pixel_backends": _schema(
@@ -851,6 +888,12 @@ def _parse_clean_options(options: Any) -> dict[str, Any]:
         if not isinstance(value, expected_type):
             type_name = "boolean" if expected_type is bool else "string"
             raise ValueError(f"option {key!r} must be a {type_name}")
+    # An unrecognised deep_images value used to fall back to "auto", which turns
+    # a request for lossless cleaning into one that may recompress. Reject it
+    # here, where every caller -- single file and batch alike -- passes through.
+    deep_images = options.get("deep_images")
+    if deep_images is not None and deep_images not in DEEP_IMAGE_MODES:
+        raise ValueError(f"option 'deep_images' must be one of {sorted(DEEP_IMAGE_MODES)}")
     return options
 
 
@@ -1657,6 +1700,7 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
                 dest,
                 fmt=container_fmt,
                 also_layer_a_text=bool(options.get("also_layer_a_text", True)),
+                deep_images=str(options.get("deep_images", "auto")),
             )
             cleaned_bytes = dest.read_bytes()
             report = {"kind": "container", **result}
@@ -1796,6 +1840,7 @@ def _run_external_structure_parity(
                 text=True,
                 timeout=60,
                 check=False,
+                creationflags=subprocess_creationflags,
                 preexec_fn=subprocess_preexec_fn,
             )
         except Exception as exc:

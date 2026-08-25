@@ -1,8 +1,10 @@
-# All changes need review from the maintainer before merge.
+# All changes need review from a code owner before merge.
 # Only code-owner approvals count toward the required review on main.
-* @guillaumemeyer
+* @guillaumemeyer @bentalay @poorvith-mp
 
 # Security-sensitive surface stays explicitly with the maintainer:
 # CI/CD workflows, dependency automation, and the security policy.
 /.github/ @guillaumemeyer
+CODE_OF_CONDUCT.md @guillaumemeyer
+LICENSE @guillaumemeyer
 SECURITY.md @guillaumemeyer
