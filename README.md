@@ -369,6 +369,14 @@ The deployment-specific steps, including the current production URL
 [`remove-watermark-ddj.pages.dev`](https://remove-watermark-ddj.pages.dev), are in
 [`docs/cloudflare-pages.md`](docs/cloudflare-pages.md).
 
+For direct, key-protected API clients, the repository also includes a standalone
+Cloudflare Worker edge proxy under [`worker/`](worker/). It forwards the same
+allowlisted service routes to an HTTPS Python backend and keeps both the client
+key and backend credential server-side. Deployment and verification are in
+[`docs/cloudflare-worker-api.md`](docs/cloudflare-worker-api.md). The Worker is
+an authenticated proxy; it does not turn the Python cleaning engine or its
+optional pixel-watermark backends into native Worker code.
+
 The `cf` branch is kept deployable from the repository root: it contains the
 same `main` service code plus the Pages static output, same-origin API proxy,
 headers, and Wrangler configuration. The Pages client exposes every service

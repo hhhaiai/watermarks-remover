@@ -16,6 +16,11 @@
 !/service/**
 !/functions/
 !/functions/**
+!/worker/
+!/worker/**
+worker/.dev.vars*
+worker/.env*
+worker/.wrangler/
 !/public/
 !/public/**
 !/skills/remove-ai-marks/

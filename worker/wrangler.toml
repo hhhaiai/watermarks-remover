@@ -1,0 +1,10 @@
+name = "remove-watermark-api"
+main = "src/index.js"
+compatibility_date = "2026-08-21"
+workers_dev = true
+preview_urls = false
+
+# Secrets are intentionally not stored in this file. Set them with:
+#   npx wrangler secret put API_KEY --config worker/wrangler.toml
+#   npx wrangler secret put BACKEND_URL --config worker/wrangler.toml
+#   npx wrangler secret put BACKEND_API_KEY --config worker/wrangler.toml
